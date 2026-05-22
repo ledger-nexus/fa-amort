@@ -3,40 +3,37 @@
 // runDepreciationAction — the load-bearing Server Action.
 //
 // Given an (asset, book, through-date) tuple, compute the depreciation
-// expense due, post a JE via the ledger-core HTTP bridge, and update
-// the FixedAssetBookAttributes.accumulatedDepreciation + lastDepreciatedThrough.
+// expense due and POST it to ledger-core's transactional endpoint
+// /api/internal/fixed-asset/record-depreciation. That endpoint wraps:
+//   1. N JE posts (one per period) via postJournalEntry, and
+//   2. The FixedAssetBookAttributes update (accumulatedDepreciation +
+//      lastDepreciatedThrough)
+// in a single transaction. A crash mid-run leaves the books unchanged
+// — no drift between posted JEs and book-attrs state.
 //
-// The JE shape:
+// The JE shape (set server-side from book-attrs account codes):
 //   DR  depreciationExpenseAccountCode   (P&L expense)
 //   CR  accumDepreciationAccountCode     (contra-asset)
 //
 // One JE per period (calendar month) per asset per book. Posted with
-// source=SYSTEM. v0.1 doesn't batch across assets (one Server Action call
-// per asset); v0.2 will add a "run month-end for all in-service assets"
-// batch action.
+// source=SYSTEM, sourceSystem="fa-amort", sourceRecordType="DepreciationRun",
+// sourceRecordId="<assetId>:<bookCode>:<YYYY-MM-DD>". The lineage triple
+// dedups server-side via the partial unique index — re-running a
+// partially-failed batch is safe.
 //
-// State updates after a successful post:
-//   - FixedAssetBookAttributes.accumulatedDepreciation += period.expenseAmount
-//   - FixedAssetBookAttributes.lastDepreciatedThrough = period.periodEnd
-//
-// In v0.1 these updates happen via direct DB write to ledger-core's
-// fixed_asset_book_attributes table (the same shared-DB pattern recon +
-// revenue-rec + integrations use for cross-repo writes). v0.2 will
-// refactor this to a new ledger-core internal endpoint:
-//   POST /api/internal/fixed-asset/record-depreciation
-// which wraps both the JE post + the FABookAttrs update in one
-// transaction. Until then, the JE-post + FABookAttrs-update is a
-// two-step operation; a crash between them leaves drift the admin must
-// reconcile.
+// Closing the v0.1 exception: prior to ledger-core v1.11, fa-amort
+// posted JEs via the journal-entries endpoint and then issued a
+// SEPARATE Prisma write to update fixed_asset_book_attributes. That
+// two-step pattern left a drift window (JEs posted, book-attrs update
+// failed). The transactional endpoint eliminates it.
 
 import { revalidatePath } from "next/cache";
 import { Decimal } from "decimal.js";
 import { prisma } from "@/lib/db";
 import { runDepreciation } from "@/lib/accounting/depreciation";
 import {
-  postEntryViaLedgerCore,
+  recordDepreciationViaLedgerCore,
   LedgerCoreError,
-  type LedgerJournalEntryInput,
 } from "@/lib/ledger-bridge";
 
 export interface RunDepreciationInput {
@@ -142,52 +139,18 @@ export async function runDepreciationAction(
       };
     }
 
-    // 3. Post one JE per period.
-    const entryNumbers: string[] = [];
-    for (const period of result.periods) {
-      const memo = `Depreciation — ${asset.code} ${asset.description.slice(0, 40)} (${
-        bookAttrs.book.code
-      }) — ${period.periodEnd.toISOString().slice(0, 7)}`;
-      const entry: LedgerJournalEntryInput = {
-        entityCode: asset.entity.code,
-        bookCode: bookAttrs.book.code,
-        currencyCode: asset.acquisitionCurrencyId,
-        documentDate: period.periodEnd,
-        memo,
-        source: "SYSTEM",
-        sourceSystem: "fa-amort",
-        sourceRecordType: "DepreciationRun",
-        sourceRecordId: `${asset.id}:${bookAttrs.book.code}:${period.periodEnd
-          .toISOString()
-          .slice(0, 10)}`,
-        lines: [
-          {
-            accountCode: bookAttrs.depreciationExpenseAccountCode,
-            debit: period.expenseAmount,
-            description: `Depreciation expense ${asset.code}`,
-          },
-          {
-            accountCode: bookAttrs.accumDepreciationAccountCode,
-            credit: period.expenseAmount,
-            description: `Accumulated depreciation ${asset.code}`,
-          },
-        ],
-      };
-      const posted = await postEntryViaLedgerCore(entry);
-      entryNumbers.push(posted.entryNumber);
-    }
-
-    // 4. Update book attributes. Single update at the end — if any of
-    // the JE posts above failed, we never reach here (LedgerCoreError
-    // throws). If all succeeded, advance state once.
-    await prisma.fixedAssetBookAttributes.update({
-      where: {
-        assetId_bookId: { assetId: input.assetId, bookId: input.bookId },
-      },
-      data: {
-        accumulatedDepreciation: result.cumulativeAfter.toFixed(4),
-        lastDepreciatedThrough: result.newLastDepreciatedThrough,
-      },
+    // 3. POST all periods + book-attrs update in one transactional call
+    // to ledger-core. The endpoint handles JE creation, dedup-by-lineage,
+    // and the FixedAssetBookAttributes update atomically.
+    const posted = await recordDepreciationViaLedgerCore({
+      assetCode: asset.code,
+      entityCode: asset.entity.code,
+      bookCode: bookAttrs.book.code,
+      currencyCode: asset.acquisitionCurrencyId,
+      periods: result.periods.map((p) => ({
+        periodEnd: p.periodEnd,
+        expenseAmount: p.expenseAmount,
+      })),
     });
 
     revalidatePath("/fixed-assets");
@@ -195,13 +158,17 @@ export async function runDepreciationAction(
     revalidatePath("/depreciation-runs");
     revalidatePath("/");
 
+    const dupNote =
+      posted.duplicateCount > 0
+        ? ` (${posted.duplicateCount} already posted)`
+        : "";
     return {
       ok: true,
-      message: `Posted ${result.periods.length} monthly JE(s) totaling ${result.totalExpense.toFixed(2)}.`,
-      periodsBooked: result.periods.length,
+      message: `Posted ${posted.freshCount} monthly JE(s) totaling ${result.totalExpense.toFixed(2)}${dupNote}.`,
+      periodsBooked: posted.freshCount,
       totalExpense: result.totalExpense.toFixed(2),
-      entryNumbers,
-      cumulativeAfter: result.cumulativeAfter.toFixed(2),
+      entryNumbers: posted.entryNumbers,
+      cumulativeAfter: new Decimal(posted.newAccumulatedDepreciation).toFixed(2),
     };
   } catch (e) {
     if (e instanceof LedgerCoreError) {

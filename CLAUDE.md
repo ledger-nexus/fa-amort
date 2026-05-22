@@ -24,7 +24,7 @@ The architecture canon is [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Read i
 
 6. **JEs are posted via the HTTP bridge, never via direct DB write.** `src/lib/ledger-bridge.ts` is the only path to insert into `gl_entry_header` / `gl_entry_line`. Same discipline as recon and revenue-rec. The bridge errors propagate as `LedgerCoreError` with structured codes — surface them in the Server Action result, do not swallow.
 
-7. **Book-attribute updates are direct DB writes in v0.1.** This is a known scoped exception, same shape as recon's "shared DB" period. v0.2 introduces `POST /api/internal/fixed-asset/record-depreciation` on ledger-core which wraps JE post + book-attrs update in one transaction. Until then: post JEs first, then update `accumulatedDepreciation` + `lastDepreciatedThrough` once at the end. A crash between the two leaves drift the admin must reconcile.
+7. **JE posts + book-attrs updates are transactional (v0.2).** fa-amort POSTs to ledger-core's `/api/internal/fixed-asset/record-depreciation` endpoint which wraps the JE posts AND the `FixedAssetBookAttributes` update (accumulatedDepreciation + lastDepreciatedThrough) in one transaction. A crash mid-run leaves the books unchanged — there is NO drift window. The v0.1 two-step pattern (post via JEs endpoint, then update book-attrs by direct DB write) is gone; the bridge function `recordDepreciationViaLedgerCore` is now the only path. Dedup-by-lineage is server-side via the partial unique index on `(sourceSystem, sourceRecordType, sourceRecordId)`.
 
 8. **Mirror discipline.** Enum-typed columns in ledger-core MUST stay enums here (Prisma's `db push` errors otherwise). recon and revenue-rec learned this the hard way; this schema was built right the first time. If you add a new ledger-core enum, mirror it here and run `prisma migrate diff --from-url … --to-schema-datamodel … --script` to extract only the additive SQL for owned tables.
 
@@ -32,7 +32,7 @@ The architecture canon is [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Read i
 
 - **Scheduler** ([`src/lib/accounting/depreciation.ts`](src/lib/accounting/depreciation.ts)) — `runDepreciation({asset, throughDate})` and `projectFullSchedule(spec)`. Pure functions, decimal.js-based, 22 unit tests.
 - **Server Action** ([`src/app/actions/run-depreciation.ts`](src/app/actions/run-depreciation.ts)) — `runDepreciationAction({assetId, bookId, throughDate})`. Loads → schedules → posts JE per period → advances book-attrs.
-- **Ledger bridge** ([`src/lib/ledger-bridge.ts`](src/lib/ledger-bridge.ts)) — `postEntryViaLedgerCore(entry)` + `LedgerCoreError`. Copy of recon's bridge with the same structured error codes.
+- **Ledger bridge** ([`src/lib/ledger-bridge.ts`](src/lib/ledger-bridge.ts)) — `recordDepreciationViaLedgerCore({ assetCode, entityCode, bookCode, periods })` is the transactional path the Server Action uses. `postEntryViaLedgerCore(entry)` remains for ad-hoc one-off JE posts (not currently used). Both share `LedgerCoreError` + the structured-error-code envelope.
 - **Schema** — `FixedAsset`, `FixedAssetBookAttributes`, all enums mirrored from ledger-core. `AiAssetSuggestion` owned by fa-amort (empty in v0.1).
 - **UI** (port 3004): dashboard with "behind on depreciation" widget (assets where `lastDepreciatedThrough` is null or >45 days ago), `/fixed-assets`, `/fixed-assets/[id]` with per-book run form + 12-month forward projection, `/depreciation-runs` history.
 - **Tests**: 22 unit tests in `tests/depreciation.test.ts`. No DB needed; runs anywhere.
@@ -42,8 +42,8 @@ The architecture canon is [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Read i
 See README "What lands next" for the longer list. The natural first chunks:
 
 1. **MACRS lookup tables** — `src/lib/accounting/macrs.ts` with the percentage tables from IRS Pub 946 for 3 / 5 / 7 / 15-year half-year convention. Plug into the existing `runDepreciation` dispatch.
-2. **`POST /api/internal/fixed-asset/record-depreciation`** on ledger-core — wraps JE post + book-attrs update transactionally. Removes the two-step drift window.
-3. **AI capex classifier** — Claude Opus 4.7 with `messages.parse` + zod-output-format (same pattern revenue-rec uses), logs to `AiAssetSuggestion` with `kind=CAPEX_CLASSIFICATION`.
+2. **AI capex classifier** — Claude Opus 4.7 with `messages.parse` + zod-output-format (same pattern revenue-rec uses), logs to `AiAssetSuggestion` with `kind=CAPEX_CLASSIFICATION`.
+3. **Disposal / impairment flows** — JE for retirement (write off remaining NBV, recognize gain/loss vs. proceeds). New endpoint or extend record-depreciation.
 
 ## Stack
 

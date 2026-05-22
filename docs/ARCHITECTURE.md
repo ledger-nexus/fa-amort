@@ -14,18 +14,21 @@ Cost of this choice: every companion repo mirrors a slice of ledger-core's schem
 
 ## The cross-repo write story
 
-When fa-amort posts a depreciation JE, two pieces of state change atomically *in concept*:
+When fa-amort posts a depreciation JE, two pieces of state change atomically:
 
 1. A new row in `gl_entry_header` + N rows in `gl_entry_line` (ledger-core's `JournalEntry` / `JournalLine` tables).
 2. `FixedAssetBookAttributes.accumulatedDepreciation` increases by the expense amount; `lastDepreciatedThrough` moves forward.
 
-In v0.1 these are *not* one transaction. Step 1 is via the HTTP bridge `POST /api/internal/journal-entries` on ledger-core (same endpoint recon's adjustment-JE flow and revenue-rec's recognition flow use). Step 2 is via direct DB write from fa-amort to `fixed_asset_book_attributes` — a known scoped exception, accepted on the grounds that:
+**v0.2 (current): one HTTP call, one transaction.** fa-amort POSTs to ledger-core's `POST /api/internal/fixed-asset/record-depreciation`. The endpoint takes `{assetCode, entityCode, bookCode, periods[]}` and inside a single `prisma.$transaction` does:
 
-- The atomicity gap is narrow (microseconds between the JE post returning success and the local Prisma update).
-- A crash in the gap leaves the JE posted but the book-attrs not advanced. The next run will recompute the same period and (in v0.2 with the dedup endpoint) the duplicate JE is rejected; or (in v0.1) the duplicate JE is created. The admin reconciles either way.
-- The alternative — a single HTTP endpoint that does both — is the right design but doesn't exist yet. v0.2 ships `POST /api/internal/fixed-asset/record-depreciation` on ledger-core. Until then, fa-amort takes the small drift risk in exchange for not blocking the v0.1 release on a ledger-core change.
+- For each period, check the lineage triple `(sourceSystem='fa-amort', sourceRecordType='DepreciationRun', sourceRecordId='<assetId>:<bookCode>:<YYYY-MM-DD>')`. If a matching JE exists, count it as a duplicate and skip the post. Otherwise call `postJournalEntry` (which itself was refactored to accept a `TransactionClient` so it runs INSIDE the outer transaction without nesting `$transaction`).
+- After the loop, advance `FixedAssetBookAttributes.accumulatedDepreciation` by the sum of FRESH expense (excluding duplicates) and move `lastDepreciatedThrough` to `max(periodEnd)` across the batch.
 
-This is the same pattern recon used during its v0.1 "shared-DB period" before recon's bridge work. The discipline is: keep the exception explicit and time-bound, document it in CLAUDE.md, and pay it down in v0.2.
+A crash mid-run rolls back everything — no drift between posted JEs and book-attrs state. A retry with the same batch sees existing JEs as duplicates, adds zero fresh expense to accumulated, and is therefore a true no-op against state.
+
+**v0.1 (historical): two-step write.** fa-amort posted JEs via the `journal-entries` endpoint and then issued a *separate* Prisma write directly to `fixed_asset_book_attributes`. That left a drift window: if the second write failed (network/DB issue), JEs were posted but book-attrs didn't advance, so the next run would recompute and re-post the same periods — except those duplicate posts were not server-side-deduped in v0.1, so they actually inserted again. The v0.2 endpoint plus the lineage-triple partial unique index on `gl_entry_header` together close that loop end-to-end.
+
+Why a transactional endpoint instead of two calls and faith? Because the alternative — relying on each repo's "next run resumes from `lastDepreciatedThrough`" logic — only works if `lastDepreciatedThrough` itself can be trusted to advance. If JE posts succeed but the book-attrs UPDATE fails, the next run looks at the unchanged `lastDepreciatedThrough` and re-computes the SAME periods, which on retry are now duplicates. With server-side dedup, the duplicate posts are rejected — but then `lastDepreciatedThrough` STILL never advances (because freshExpense is zero and the retry's flow can't know that "max periodEnd in batch" should advance the high-water mark on its own). The transactional wrapper is the only design that's drift-free under arbitrary failure modes.
 
 ## The math, and why it's pure functions
 
