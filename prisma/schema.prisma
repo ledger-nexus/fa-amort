@@ -1,0 +1,332 @@
+// fa-amort Prisma schema.
+//
+// Two halves, same pattern as recon / revenue-rec / integrations:
+//
+//   1. ledger-core mirror — LegalEntity, Book, Account, JournalEntry,
+//      JournalLine, Party, Currency, FixedAsset, FixedAssetBookAttributes.
+//      Column-for-column with ledger-core's schema. fa-amort does NOT
+//      migrate these tables; ledger-core owns them. Read-mostly here;
+//      depreciation runs UPDATE FixedAssetBookAttributes.accumulatedDepreciation
+//      and .lastDepreciatedThrough as a cross-repo write (v0.1; v0.2 will
+//      refactor to an HTTP boundary endpoint on ledger-core).
+//
+//   2. fa-amort-OWNED — AiAssetSuggestion (audit trail for v0.2's AI
+//      classification + useful-life suggestions). v0.1 has zero rows here
+//      since AI doesn't fire yet; table exists so v0.2 doesn't need a
+//      schema migration.
+//
+// Mirror discipline: enum-typed columns in ledger-core MUST stay enums
+// here (Prisma's db push errors otherwise). recon and revenue-rec already
+// learned this the hard way; this schema is built right the first time.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// =========================================================================
+// ledger-core mirror — DO NOT EDIT without syncing upstream
+// =========================================================================
+
+model LegalEntity {
+  id                   String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code                 String  @unique
+  name                 String
+  parentEntityId       String? @db.Uuid
+  functionalCurrencyId String
+  sourceSystem         String?
+  sourceRecordType     String?
+  sourceRecordId       String?
+  sourcePayload        Json?
+  mappingVersion       String?
+  extensions           Json?
+
+  journalEntries JournalEntry[]
+  fixedAssets    FixedAsset[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("legal_entity")
+}
+
+model Book {
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code                String    @unique
+  name                String
+  basis               BookBasis
+  reportingCurrencyId String
+  isActive            Boolean   @default(true)
+  extensions          Json?
+
+  journalEntries           JournalEntry[]
+  fixedAssetBookAttributes FixedAssetBookAttributes[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("book")
+}
+
+model Account {
+  id               String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  entityId         String?       @db.Uuid
+  code             String
+  name             String
+  type             AccountType
+  normalBalance    NormalBalance
+  subtype          String?
+  isContra         Boolean       @default(false)
+  isControlAccount Boolean       @default(false)
+  isBank           Boolean       @default(false)
+  parentAccountId  String?       @db.Uuid
+  bookScope        String[]      @default([])
+  active           Boolean       @default(true)
+
+  sourceSystem     String?
+  sourceRecordType String?
+  sourceRecordId   String?
+  sourcePayload    Json?
+  mappingVersion   String?
+  extensions       Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([entityId, code])
+  @@map("account")
+}
+
+model Party {
+  id            String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  entityId      String? @db.Uuid
+  code          String
+  displayName   String
+  parentPartyId String? @db.Uuid
+
+  fixedAssetVendors FixedAsset[] @relation("FixedAssetVendor")
+
+  sourceSystem     String?
+  sourceRecordType String?
+  sourceRecordId   String?
+  sourcePayload    Json?
+  mappingVersion   String?
+  extensions       Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([entityId, code])
+  @@map("party")
+}
+
+model Currency {
+  code     String  @id
+  name     String
+  decimals Int     @default(2)
+  symbol   String?
+
+  fixedAssetAcquisitions FixedAsset[] @relation("FixedAssetAcqCcy")
+
+  @@map("currency")
+}
+
+model JournalEntry {
+  id           String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  entryNumber  String        @unique
+  entityId     String        @db.Uuid
+  entity       LegalEntity   @relation(fields: [entityId], references: [id])
+  bookId       String        @db.Uuid
+  book         Book          @relation(fields: [bookId], references: [id])
+  periodId     String?       @db.Uuid
+  documentDate DateTime      @db.Date
+  postingDate  DateTime      @db.Date
+  memo         String
+  currencyId   String
+  fxRate       Decimal       @default(1) @db.Decimal(20, 10)
+  source       JournalSource @default(MANUAL)
+  status       EntryStatus   @default(POSTED)
+  reversalOfId String?       @db.Uuid
+
+  sourceSystem     String?
+  sourceRecordType String?
+  sourceRecordId   String?
+  sourcePayload    Json?
+  mappingVersion   String?
+  extensions       Json?
+
+  createdAt DateTime @default(now())
+  createdBy String?
+
+  @@index([entityId, bookId, documentDate])
+  @@map("gl_entry_header")
+}
+
+// =========================================================================
+// Fixed assets (the substrate models fa-amort reads + drives)
+// =========================================================================
+
+model FixedAsset {
+  id       String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  entityId String      @db.Uuid
+  entity   LegalEntity @relation(fields: [entityId], references: [id])
+
+  code                  String
+  description           String
+  category              String?
+  vendorPartyId         String?          @db.Uuid
+  vendor                Party?           @relation("FixedAssetVendor", fields: [vendorPartyId], references: [id])
+  acquisitionDate       DateTime         @db.Date
+  acquisitionCost       Decimal          @db.Decimal(18, 4)
+  acquisitionCurrencyId String
+  acquisitionCurrency   Currency         @relation("FixedAssetAcqCcy", fields: [acquisitionCurrencyId], references: [code])
+  status                FixedAssetStatus @default(IN_SERVICE)
+  disposalDate          DateTime?        @db.Date
+  disposalProceeds      Decimal?         @db.Decimal(18, 4)
+
+  assetAccountCode String
+
+  bookAttributes      FixedAssetBookAttributes[]
+  aiSuggestions       AiAssetSuggestion[]
+
+  sourceSystem     String?
+  sourceRecordType String?
+  sourceRecordId   String?
+  sourcePayload    Json?
+  mappingVersion   String?
+  extensions       Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([entityId, code])
+  @@index([entityId, status])
+  @@map("fixed_asset")
+}
+
+enum FixedAssetStatus {
+  IN_SERVICE
+  IDLE
+  DISPOSED
+  HELD_FOR_SALE
+}
+
+model FixedAssetBookAttributes {
+  assetId                 String             @db.Uuid
+  asset                   FixedAsset         @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  bookId                  String             @db.Uuid
+  book                    Book               @relation(fields: [bookId], references: [id])
+  usefulLifeMonths        Int
+  depreciationMethod      DepreciationMethod
+  inServiceDate           DateTime           @db.Date
+  salvageValue            Decimal            @default(0) @db.Decimal(18, 4)
+  accumulatedDepreciation Decimal            @default(0) @db.Decimal(18, 4)
+  lastDepreciatedThrough  DateTime?          @db.Date
+
+  depreciationExpenseAccountCode String
+  accumDepreciationAccountCode   String
+
+  @@id([assetId, bookId])
+  @@index([bookId, lastDepreciatedThrough])
+  @@map("fixed_asset_book_attributes")
+}
+
+enum DepreciationMethod {
+  STRAIGHT_LINE
+  DOUBLE_DECLINING
+  MACRS_3_HY
+  MACRS_5_HY
+  MACRS_7_HY
+  MACRS_15_HY
+  UNITS_OF_PRODUCTION
+  NONE
+}
+
+// =========================================================================
+// fa-amort-OWNED models
+// =========================================================================
+
+// Audit trail for AI-assisted asset workflows (v0.2). Every Claude call
+// is logged here whether the human accepts or rejects the suggestion —
+// same discipline as recon's AiSuggestion and revenue-rec's
+// AiExtractionSuggestion. Pre-creating the table now so v0.2 doesn't
+// need a separate schema migration.
+//
+// kind discriminates between the suggestion types: CAPEX_CLASSIFICATION
+// (is this purchase capitalizable?), USEFUL_LIFE (how many months?),
+// IMPAIRMENT_INDICATOR (does this text suggest impairment?).
+model AiAssetSuggestion {
+  id           String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  /// Nullable because CAPEX_CLASSIFICATION runs BEFORE the asset exists.
+  assetId      String?                @db.Uuid
+  asset        FixedAsset?            @relation(fields: [assetId], references: [id], onDelete: Cascade)
+
+  kind         AiAssetSuggestionKind
+  /// Free-form input the model evaluated: a purchase description, invoice
+  /// text, news article excerpt, etc.
+  inputText    String
+  /// The model's structured response. Shape depends on kind.
+  outputJson   Json
+
+  modelName        String
+  promptHash       String?
+  promptTokens     Int?
+  completionTokens Int?
+  latencyMs        Int?
+
+  createdAt DateTime @default(now())
+
+  @@index([assetId])
+  @@index([kind, createdAt])
+  @@map("ai_asset_suggestion")
+}
+
+enum AiAssetSuggestionKind {
+  CAPEX_CLASSIFICATION
+  USEFUL_LIFE
+  IMPAIRMENT_INDICATOR
+}
+
+// =========================================================================
+// Enums mirrored from ledger-core. MUST stay in sync.
+// =========================================================================
+
+enum BookBasis {
+  US_GAAP
+  US_TAX
+  IFRS
+  MGMT
+  STATUTORY
+}
+
+enum AccountType {
+  ASSET
+  LIABILITY
+  EQUITY
+  REVENUE
+  EXPENSE
+}
+
+enum NormalBalance {
+  DEBIT
+  CREDIT
+}
+
+enum JournalSource {
+  MANUAL
+  SEED
+  SYSTEM
+  AI_APPROVED
+  IMPORT
+}
+
+enum EntryStatus {
+  DRAFT
+  POSTED
+  VOID
+  REVERSED
+}
