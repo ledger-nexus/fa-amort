@@ -62,6 +62,40 @@ export class LedgerCoreError extends Error {
   }
 }
 
+/**
+ * Map a LedgerCoreError to an accountant-friendly explanation with
+ * a clear next-step. The raw .code is still on the original error
+ * for telemetry; this is for UI display only.
+ */
+export function friendlyLedgerError(e: LedgerCoreError): string {
+  switch (e.code) {
+    case "PERIOD_CLOSED":
+      return `This period is closed for posting. Reopen it from /periods on ledger-core (admin required) or run depreciation through a date in a still-open period. Detail: ${e.message}`;
+    case "UNAUTHORIZED":
+      return "Could not authenticate with ledger-core. Check that LEDGER_CORE_INTERNAL_TOKEN matches between fa-amort's env and ledger-core's INTERNAL_API_TOKEN.";
+    case "TRANSPORT_ERROR":
+      return "Could not reach ledger-core. Make sure it's running on the configured LEDGER_CORE_URL (default http://localhost:3000).";
+    case "UNBALANCED":
+      return `The depreciation JE didn't balance. This is a math bug — the engine should always produce balanced entries. Please file an issue. Detail: ${e.message}`;
+    case "UNKNOWN_ACCOUNT":
+      return `An account code referenced by the JE doesn't exist. Check that the depreciation expense and accumulated-depreciation account codes on the asset's FixedAssetBookAttributes row exist in the chart of accounts. Detail: ${e.message}`;
+    case "UNKNOWN_ENTITY":
+      return `The asset's entity code wasn't recognized by ledger-core. Detail: ${e.message}`;
+    case "UNKNOWN_BOOK":
+      return `The book code wasn't recognized by ledger-core. Detail: ${e.message}`;
+    case "ACCOUNT_BOOK_SCOPE":
+      return `The depreciation accounts aren't in scope for this book. Update the asset's FixedAssetBookAttributes to use accounts that include this book in their bookScope. Detail: ${e.message}`;
+    case "INVALID_LINE":
+      return `A JE line was rejected as invalid. Detail: ${e.message}`;
+    case "BAD_REQUEST":
+      return `ledger-core rejected the request as malformed. Detail: ${e.message}`;
+    case "INTERNAL_ERROR":
+      return `ledger-core hit an internal error. Detail: ${e.message}`;
+    default:
+      return `${e.code}: ${e.message}`;
+  }
+}
+
 function serializeDecimal(v: Decimal | string | number | undefined): string | undefined {
   if (v === undefined || v === null) return undefined;
   if (v instanceof Decimal) return v.toFixed();

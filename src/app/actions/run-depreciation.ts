@@ -34,6 +34,7 @@ import { runDepreciation } from "@/lib/accounting/depreciation";
 import {
   recordDepreciationViaLedgerCore,
   LedgerCoreError,
+  friendlyLedgerError,
 } from "@/lib/ledger-bridge";
 
 export interface RunDepreciationInput {
@@ -172,7 +173,7 @@ export async function runDepreciationAction(
     };
   } catch (e) {
     if (e instanceof LedgerCoreError) {
-      return { ok: false, message: `ledger-core ${e.code}: ${e.message}` };
+      return { ok: false, message: friendlyLedgerError(e) };
     }
     return { ok: false, message: e instanceof Error ? e.message : "Unknown error" };
   }
