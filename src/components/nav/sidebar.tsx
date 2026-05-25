@@ -15,6 +15,8 @@ export function Sidebar() {
       <NavLink href="/depreciation-runs">Depreciation runs</NavLink>
       <NavSection label="AI workflows" />
       <NavLink href="/ai-capex">Capex classifier</NavLink>
+      <NavLink href="/ai-useful-life">Useful-life reassess</NavLink>
+      <NavLink href="/ai-impairment">Impairment screener</NavLink>
       <NavLink href="/ai-audit">AI audit log</NavLink>
     </aside>
   );
