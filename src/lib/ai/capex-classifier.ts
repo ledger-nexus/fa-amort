@@ -62,6 +62,27 @@ const CapexCategorySchema = z.enum([
 ]);
 
 const ClassificationSchema = z.object({
+  // The pre-fill fields the Accept form uses to create a FixedAsset
+  // without making the human re-type what the AI already extracted.
+  description: z
+    .string()
+    .max(120)
+    .describe(
+      "One-line asset description suitable for the FixedAsset.description column. Match the source text but in a clean form, e.g. '4× Cisco Catalyst 9300 switches'."
+    ),
+  estimatedCost: z
+    .number()
+    .nullable()
+    .describe(
+      "Total cost in dollars, extracted from the input. NULL if the input doesn't state a dollar amount. Use the TOTAL (not unit price)."
+    ),
+  vendorName: z
+    .string()
+    .max(120)
+    .nullable()
+    .describe(
+      "Vendor name if stated in the input. NULL if no vendor is named. Plain string, e.g. 'Cisco' or 'Amazon Web Services'."
+    ),
   capitalize: z
     .boolean()
     .describe(

@@ -20,6 +20,9 @@ const sampleInvoice =
   "Vendor: Cisco. 4× Catalyst 9300 48-port switches @ $3,500. Total $14,000.";
 
 const sampleClassification = {
+  description: "4× Cisco Catalyst 9300 48-port switches",
+  estimatedCost: 14000,
+  vendorName: "Cisco",
   capitalize: true,
   category: "COMPUTER_EQUIPMENT" as const,
   usefulLifeMonths: 60,
@@ -150,6 +153,9 @@ describe("classifyCapex", () => {
 
   it("handles an EXPENSE classification (capitalize=false, only expense account)", async () => {
     const expenseClassification = {
+      description: "Slack annual subscription, 50 seats",
+      estimatedCost: 7500,
+      vendorName: "Slack Technologies",
       capitalize: false,
       category: null,
       usefulLifeMonths: null,

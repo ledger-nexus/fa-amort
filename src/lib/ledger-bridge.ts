@@ -48,6 +48,7 @@ export type LedgerErrorCode =
   | "UNKNOWN_ACCOUNT"
   | "UNKNOWN_ENTITY"
   | "UNKNOWN_BOOK"
+  | "UNKNOWN_VENDOR"
   | "PERIOD_CLOSED"
   | "ACCOUNT_BOOK_SCOPE"
   | "UNAUTHORIZED"
@@ -83,6 +84,8 @@ export function friendlyLedgerError(e: LedgerCoreError): string {
       return `The asset's entity code wasn't recognized by ledger-core. Detail: ${e.message}`;
     case "UNKNOWN_BOOK":
       return `The book code wasn't recognized by ledger-core. Detail: ${e.message}`;
+    case "UNKNOWN_VENDOR":
+      return `The vendor party code wasn't found. Either omit the vendor field or seed the party in ledger-core first. Detail: ${e.message}`;
     case "ACCOUNT_BOOK_SCOPE":
       return `The depreciation accounts aren't in scope for this book. Update the asset's FixedAssetBookAttributes to use accounts that include this book in their bookScope. Detail: ${e.message}`;
     case "INVALID_LINE":
@@ -302,4 +305,121 @@ export async function recordDepreciationViaLedgerCore(
     newAccumulatedDepreciation: payload.newAccumulatedDepreciation,
     newLastDepreciatedThrough: payload.newLastDepreciatedThrough,
   };
+}
+
+// ─── Create FixedAsset (v0.3) ──────────────────────────────────────────────
+//
+// HTTP client to ledger-core's POST /api/internal/fixed-asset. Used by
+// fa-amort's "Accept AI capex suggestion" flow to turn a reviewed AI
+// proposal into a real FixedAsset row (and its per-book attributes)
+// without writing to the substrate directly.
+//
+// Idempotency: ledger-core dedupes on (entityCode, code). A retry with
+// the same identifiers returns the existing asset with wasDuplicate:true.
+
+export interface CreateFixedAssetBookInput {
+  bookCode: string;
+  usefulLifeMonths: number;
+  method: "STRAIGHT_LINE" | "MACRS_5_HY" | "MACRS_7_HY" | "NONE";
+  inServiceDate: Date;
+  salvageValue?: Decimal | string | number;
+  depreciationExpenseAccountCode: string;
+  accumDepreciationAccountCode: string;
+}
+
+export interface CreateFixedAssetInput {
+  entityCode: string;
+  code: string;
+  description: string;
+  category?: string;
+  vendorPartyCode?: string;
+  acquisitionDate: Date;
+  acquisitionCost: Decimal | string | number;
+  acquisitionCurrencyCode: string;
+  assetAccountCode: string;
+  books: CreateFixedAssetBookInput[];
+  sourceSystem?: string;
+  sourceRecordType?: string;
+  sourceRecordId?: string;
+  sourcePayload?: unknown;
+}
+
+export interface CreateFixedAssetResult {
+  id: string;
+  code: string;
+  wasDuplicate?: boolean;
+}
+
+export async function createFixedAssetViaLedgerCore(
+  input: CreateFixedAssetInput
+): Promise<CreateFixedAssetResult> {
+  const baseUrl = process.env.LEDGER_CORE_URL ?? DEFAULT_LEDGER_CORE_URL;
+  const token = process.env.LEDGER_CORE_INTERNAL_TOKEN;
+  if (!token) {
+    throw new LedgerCoreError(
+      "UNAUTHORIZED",
+      "LEDGER_CORE_INTERNAL_TOKEN is not set in fa-amort's env — cannot create fixed asset"
+    );
+  }
+
+  const body = {
+    entityCode: input.entityCode,
+    code: input.code,
+    description: input.description,
+    category: input.category,
+    vendorPartyCode: input.vendorPartyCode,
+    acquisitionDate: input.acquisitionDate.toISOString().slice(0, 10),
+    acquisitionCost: serializeDecimal(input.acquisitionCost),
+    acquisitionCurrencyCode: input.acquisitionCurrencyCode,
+    assetAccountCode: input.assetAccountCode,
+    books: input.books.map((b) => ({
+      bookCode: b.bookCode,
+      usefulLifeMonths: b.usefulLifeMonths,
+      method: b.method,
+      inServiceDate: b.inServiceDate.toISOString().slice(0, 10),
+      salvageValue: serializeDecimal(b.salvageValue),
+      depreciationExpenseAccountCode: b.depreciationExpenseAccountCode,
+      accumDepreciationAccountCode: b.accumDepreciationAccountCode,
+    })),
+    sourceSystem: input.sourceSystem,
+    sourceRecordType: input.sourceRecordType,
+    sourceRecordId: input.sourceRecordId,
+    sourcePayload: input.sourcePayload,
+  };
+
+  const fetchFn = _fetchOverride ?? fetch;
+  let res: Response;
+  try {
+    res = await fetchFn(`${baseUrl}/api/internal/fixed-asset`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    throw new LedgerCoreError(
+      "TRANSPORT_ERROR",
+      `Failed to reach ledger-core at ${baseUrl}: ${e instanceof Error ? e.message : "Unknown error"}`
+    );
+  }
+
+  type ApiResponse =
+    | { ok: true; id: string; code: string; wasDuplicate?: boolean }
+    | { ok: false; error: { code: LedgerErrorCode; message: string } };
+
+  let payload: ApiResponse;
+  try {
+    payload = (await res.json()) as ApiResponse;
+  } catch {
+    throw new LedgerCoreError(
+      "TRANSPORT_ERROR",
+      `ledger-core returned non-JSON response (status ${res.status})`,
+      res.status
+    );
+  }
+
+  if (!payload.ok) {
+    throw new LedgerCoreError(payload.error.code, payload.error.message, res.status);
+  }
+
+  return { id: payload.id, code: payload.code, wasDuplicate: payload.wasDuplicate };
 }

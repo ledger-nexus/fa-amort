@@ -51,6 +51,15 @@ export default async function AiAuditPage() {
       ?.cacheReadTokens;
     return (cached ?? 0) > 0;
   }).length;
+  // Acceptance rate — proves the human-in-the-loop discipline is real.
+  const decided = rows.filter((r) => {
+    const d = (r.outputJson as { decision?: string })?.decision;
+    return d === "ACCEPTED" || d === "REJECTED";
+  }).length;
+  const accepted = rows.filter((r) => {
+    const d = (r.outputJson as { decision?: string })?.decision;
+    return d === "ACCEPTED";
+  }).length;
 
   // Crude cost: Opus 4.7 prices — $5/M input, $25/M output. Cache reads
   // are billed at ~10% of input. Display in cents at high precision so
@@ -73,8 +82,17 @@ export default async function AiAuditPage() {
         </p>
       </header>
 
-      <div className="grid grid-cols-4 gap-3">
+      <div className="grid grid-cols-5 gap-3">
         <StatCard label="Total runs" value={totalRuns.toLocaleString()} />
+        <StatCard
+          label="Acceptance rate"
+          value={
+            decided > 0
+              ? `${((accepted / decided) * 100).toFixed(0)}%`
+              : "—"
+          }
+          hint={`${accepted} accepted of ${decided} decided · ${totalRuns - decided} pending`}
+        />
         <StatCard
           label="Cache hit rate"
           value={
@@ -122,7 +140,8 @@ export default async function AiAuditPage() {
                   <TH>When</TH>
                   <TH>Kind</TH>
                   <TH>Input</TH>
-                  <TH>Decision</TH>
+                  <TH>AI proposal</TH>
+                  <TH>Human decision</TH>
                   <TH>Confidence</TH>
                   <TH className="text-right">Tokens</TH>
                   <TH className="text-right">Latency</TH>
@@ -136,8 +155,11 @@ export default async function AiAuditPage() {
                       category: string | null;
                       confidence: number;
                     };
+                    decision?: "PENDING" | "ACCEPTED" | "REJECTED";
+                    createdAssetCode?: string;
                   };
                   const c = out.classification;
+                  const decision = out.decision ?? "PENDING";
                   const total =
                     (r.promptTokens ?? 0) + (r.completionTokens ?? 0);
                   return (
@@ -162,6 +184,22 @@ export default async function AiAuditPage() {
                           )
                         ) : (
                           <span className="text-ink-400">—</span>
+                        )}
+                      </TD>
+                      <TD>
+                        {decision === "ACCEPTED" ? (
+                          <span className="flex flex-col items-start gap-0.5">
+                            <Badge tone="positive">✓ Accepted</Badge>
+                            {out.createdAssetCode ? (
+                              <span className="text-[10px] text-ink-500 font-mono">
+                                {out.createdAssetCode}
+                              </span>
+                            ) : null}
+                          </span>
+                        ) : decision === "REJECTED" ? (
+                          <Badge tone="negative">✗ Rejected</Badge>
+                        ) : (
+                          <Badge tone="neutral">pending</Badge>
                         )}
                       </TD>
                       <TD className="text-xs text-ink-700">
