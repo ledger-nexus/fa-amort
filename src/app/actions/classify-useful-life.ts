@@ -27,6 +27,11 @@ import {
   NotAuthenticatedError,
   NoTenantSelectedError,
 } from "@/lib/auth/session";
+import {
+  enforceAiBudget,
+  RateLimitExceededError,
+  MonthlySpendCapExceededError,
+} from "@/lib/auth/ai-budget";
 
 export interface ClassifyUsefulLifeInput {
   /** When tied to an existing asset, the AiAssetSuggestion gets assetId stamped. */
@@ -54,7 +59,7 @@ export async function classifyUsefulLifeAction(
     // classifiers. If assetId is provided, also verify it belongs to
     // this tenant — otherwise an attacker could attach the audit row
     // to a foreign asset (subtle but in spec for cross-tenant write).
-    await requireCurrentUser();
+    const user = await requireCurrentUser();
     const tenant = await requireCurrentTenant();
 
     const f = input.facts;
@@ -91,6 +96,12 @@ export async function classifyUsefulLifeAction(
         };
       }
     }
+
+    await enforceAiBudget({
+      tenantId: tenant.id,
+      userId: user.id,
+      action: "classifyUsefulLife",
+    });
 
     const result = await classifyUsefulLife(f);
 
@@ -146,6 +157,8 @@ export async function classifyUsefulLifeAction(
     if (e instanceof NotAuthenticatedError)
       return { ok: false, message: "You must be signed in." };
     if (e instanceof NoTenantSelectedError)
+      return { ok: false, message: e.message };
+    if (e instanceof RateLimitExceededError || e instanceof MonthlySpendCapExceededError)
       return { ok: false, message: e.message };
     return {
       ok: false,

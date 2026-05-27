@@ -38,6 +38,11 @@ import {
   NotAuthenticatedError,
   NoTenantSelectedError,
 } from "@/lib/auth/session";
+import {
+  enforceAiBudget,
+  RateLimitExceededError,
+  MonthlySpendCapExceededError,
+} from "@/lib/auth/ai-budget";
 
 export interface ClassifyCapexInput {
   invoiceText: string;
@@ -65,7 +70,7 @@ export async function classifyCapexAction(
     // This action calls Anthropic (per-tenant cost) and writes an
     // audit row. Anonymous classifier spend was on the deferred list
     // from pen-test pass 4 — this closes it.
-    await requireCurrentUser();
+    const user = await requireCurrentUser();
     const tenant = await requireCurrentTenant();
 
     if (!input.invoiceText?.trim()) {
@@ -78,6 +83,15 @@ export async function classifyCapexAction(
           "ANTHROPIC_API_KEY is not set in fa-amort's env. Add it to .env before running classifications.",
       };
     }
+
+    // Rate limit + monthly spend cap. Throws if either is hit;
+    // logs a RateLimitEvent row on success so subsequent calls see
+    // this one in the trailing window.
+    await enforceAiBudget({
+      tenantId: tenant.id,
+      userId: user.id,
+      action: "classifyCapex",
+    });
 
     const result = await classifyCapex(input.invoiceText);
 
@@ -124,6 +138,8 @@ export async function classifyCapexAction(
     if (e instanceof NotAuthenticatedError)
       return { ok: false, message: "You must be signed in." };
     if (e instanceof NoTenantSelectedError)
+      return { ok: false, message: e.message };
+    if (e instanceof RateLimitExceededError || e instanceof MonthlySpendCapExceededError)
       return { ok: false, message: e.message };
     return {
       ok: false,

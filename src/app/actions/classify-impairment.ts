@@ -29,6 +29,11 @@ import {
   NotAuthenticatedError,
   NoTenantSelectedError,
 } from "@/lib/auth/session";
+import {
+  enforceAiBudget,
+  RateLimitExceededError,
+  MonthlySpendCapExceededError,
+} from "@/lib/auth/ai-budget";
 
 export interface ClassifyImpairmentInput {
   sourceText: string;
@@ -54,7 +59,7 @@ export async function classifyImpairmentAction(
   try {
     // SECURITY (pen-test pass 4 follow-up): same gate as capex.
     // Anonymous Anthropic spend through this endpoint is closed.
-    await requireCurrentUser();
+    const user = await requireCurrentUser();
     const tenant = await requireCurrentTenant();
 
     if (!input.sourceText?.trim()) {
@@ -67,6 +72,12 @@ export async function classifyImpairmentAction(
           "ANTHROPIC_API_KEY is not set in fa-amort's env. Add it to .env before running screenings.",
       };
     }
+
+    await enforceAiBudget({
+      tenantId: tenant.id,
+      userId: user.id,
+      action: "classifyImpairment",
+    });
 
     const result = await classifyImpairment(input.sourceText);
 
@@ -111,6 +122,8 @@ export async function classifyImpairmentAction(
     if (e instanceof NotAuthenticatedError)
       return { ok: false, message: "You must be signed in." };
     if (e instanceof NoTenantSelectedError)
+      return { ok: false, message: e.message };
+    if (e instanceof RateLimitExceededError || e instanceof MonthlySpendCapExceededError)
       return { ok: false, message: e.message };
     return {
       ok: false,
