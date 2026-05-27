@@ -392,6 +392,13 @@ model AiSpendAlert {
   id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   tenantId  String   @db.Uuid
   tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  /// Companion repo that fired the alert ("recon", "revenue-rec",
+  /// "fa-amort"). Part of the unique constraint so each repo
+  /// independently tracks its crossings — the three companion repos
+  /// share this physical table, and without `source` a 80% crossing
+  /// from fa-amort would silently dedupe recon's later 80% crossing
+  /// in the same month.
+  source    String
   /// Calendar month the alert covers, in YYYY-MM (UTC).
   monthKey  String
   /// Percent of cap that triggered the alert. Today: 80 or 100.
@@ -402,7 +409,7 @@ model AiSpendAlert {
   spentUsd  Decimal  @db.Decimal(10, 2)
   sentAt    DateTime @default(now())
 
-  @@unique([tenantId, monthKey, threshold])
+  @@unique([tenantId, source, monthKey, threshold])
   @@index([tenantId, sentAt])
   @@map("ai_spend_alert")
 }
