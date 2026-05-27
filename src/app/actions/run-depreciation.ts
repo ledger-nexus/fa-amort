@@ -32,6 +32,12 @@ import { Decimal } from "decimal.js";
 import { prisma } from "@/lib/db";
 import { runDepreciation } from "@/lib/accounting/depreciation";
 import {
+  requireCurrentUser,
+  requireCurrentTenant,
+  NotAuthenticatedError,
+  NoTenantSelectedError,
+} from "@/lib/auth/session";
+import {
   recordDepreciationViaLedgerCore,
   LedgerCoreError,
   friendlyLedgerError,
@@ -63,6 +69,9 @@ export async function runDepreciationAction(
   input: RunDepreciationInput
 ): Promise<RunDepreciationState> {
   try {
+    await requireCurrentUser();
+    const tenant = await requireCurrentTenant();
+
     if (!input.assetId) return { ok: false, message: "assetId required" };
     if (!input.bookId) return { ok: false, message: "bookId required" };
     if (!input.throughDate) return { ok: false, message: "throughDate required" };
@@ -71,9 +80,15 @@ export async function runDepreciationAction(
       return { ok: false, message: `Invalid throughDate: ${input.throughDate}` };
     }
 
-    // 1. Load asset + book attributes + entity/book metadata.
-    const asset = await prisma.fixedAsset.findUnique({
-      where: { id: input.assetId },
+    // SECURITY (pen-test pass 4): tenant-scope the asset lookup.
+    // THIS WAS THE WORST GAP — anonymous depreciation JE posting via
+    // the ledger bridge against any tenant's asset, plus hijack of
+    // accumulatedDepreciation + lastDepreciatedThrough state.
+    const asset = await prisma.fixedAsset.findFirst({
+      where: {
+        id: input.assetId,
+        entity: { tenantId: tenant.id },
+      },
       select: {
         id: true,
         code: true,
@@ -83,7 +98,7 @@ export async function runDepreciationAction(
         entity: { select: { code: true } },
       },
     });
-    if (!asset) return { ok: false, message: "FixedAsset not found" };
+    if (!asset) return { ok: false, message: "FixedAsset not found in this tenant" };
     if (asset.status === "DISPOSED") {
       return { ok: false, message: "Asset is DISPOSED — no further depreciation" };
     }
@@ -172,6 +187,10 @@ export async function runDepreciationAction(
       cumulativeAfter: new Decimal(posted.newAccumulatedDepreciation).toFixed(2),
     };
   } catch (e) {
+    if (e instanceof NotAuthenticatedError)
+      return { ok: false, message: "You must be signed in to run depreciation." };
+    if (e instanceof NoTenantSelectedError)
+      return { ok: false, message: e.message };
     if (e instanceof LedgerCoreError) {
       return { ok: false, message: friendlyLedgerError(e) };
     }

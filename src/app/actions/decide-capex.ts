@@ -27,6 +27,12 @@
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/db";
 import {
+  requireCurrentUser,
+  requireCurrentTenant,
+  NotAuthenticatedError,
+  NoTenantSelectedError,
+} from "@/lib/auth/session";
+import {
   createFixedAssetViaLedgerCore,
   LedgerCoreError,
   friendlyLedgerError,
@@ -71,6 +77,9 @@ export async function acceptCapexSuggestionAction(
   input: AcceptCapexInput
 ): Promise<AcceptCapexState> {
   try {
+    await requireCurrentUser();
+    const tenant = await requireCurrentTenant();
+
     // Validate inputs early so we don't waste a ledger-core round trip.
     if (!input.suggestionId) {
       return { ok: false, message: "suggestionId is required" };
@@ -103,6 +112,23 @@ export async function acceptCapexSuggestionAction(
       return {
         ok: false,
         message: `Suggestion ${input.suggestionId} is ${suggestion.kind}, not a capex classification.`,
+      };
+    }
+
+    // SECURITY (pen-test pass 4): verify the entityCode belongs to the
+    // caller's tenant. WITHOUT THIS, the action would create a brand-
+    // new FixedAsset in ledger-core attached to ANY entityCode the
+    // caller types — a cross-tenant write hijack. The AiAssetSuggestion
+    // table currently has no tenant column, so we scope on the
+    // entityCode the caller supplied instead.
+    const entityCheck = await prisma.legalEntity.findFirst({
+      where: { code: input.entityCode, tenantId: tenant.id },
+      select: { id: true },
+    });
+    if (!entityCheck) {
+      return {
+        ok: false,
+        message: `Entity "${input.entityCode}" not found in this tenant.`,
       };
     }
 
@@ -188,6 +214,10 @@ export async function acceptCapexSuggestionAction(
       wasDuplicate: created.wasDuplicate,
     };
   } catch (e) {
+    if (e instanceof NotAuthenticatedError)
+      return { ok: false, message: "You must be signed in." };
+    if (e instanceof NoTenantSelectedError)
+      return { ok: false, message: e.message };
     if (e instanceof LedgerCoreError) {
       return { ok: false, message: friendlyLedgerError(e) };
     }
@@ -209,6 +239,14 @@ export async function rejectCapexSuggestionAction(
   input: RejectCapexInput
 ): Promise<RejectCapexState> {
   try {
+    // SECURITY (pen-test pass 4): require a signed-in user. The
+    // AiAssetSuggestion table has no tenant column, so we can't fully
+    // tenant-scope here; auth alone closes the anonymous-write
+    // surface. The TODO in the schema is to add tenantId to
+    // AiAssetSuggestion in a follow-up migration.
+    await requireCurrentUser();
+    await requireCurrentTenant();
+
     if (!input.suggestionId) {
       return { ok: false, message: "suggestionId is required" };
     }
@@ -236,6 +274,10 @@ export async function rejectCapexSuggestionAction(
     revalidatePath("/ai-audit");
     return { ok: true, message: "Suggestion rejected. Audit row stays for the trail." };
   } catch (e) {
+    if (e instanceof NotAuthenticatedError)
+      return { ok: false, message: "You must be signed in." };
+    if (e instanceof NoTenantSelectedError)
+      return { ok: false, message: e.message };
     return { ok: false, message: e instanceof Error ? e.message : "Unknown error" };
   }
 }
