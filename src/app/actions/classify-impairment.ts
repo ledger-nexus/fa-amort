@@ -31,6 +31,7 @@ import {
 } from "@/lib/auth/session";
 import {
   enforceAiBudget,
+  emitSpendAlertIfThresholdCrossed,
   RateLimitExceededError,
   MonthlySpendCapExceededError,
 } from "@/lib/auth/ai-budget";
@@ -104,6 +105,8 @@ export async function classifyImpairmentAction(
       },
       select: { id: true },
     });
+
+    await emitSpendAlertIfThresholdCrossed(tenant.id);
 
     revalidatePath("/ai-impairment");
     revalidatePath("/ai-audit");

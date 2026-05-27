@@ -144,6 +144,21 @@ async function checkRateLimits(tenantId: string, userId: string): Promise<void> 
 }
 
 async function checkMonthlySpendCap(tenantId: string): Promise<void> {
+  const { spentUsd, capUsd } = await computeMonthlySpend(tenantId);
+  if (spentUsd.greaterThanOrEqualTo(capUsd)) {
+    throw new MonthlySpendCapExceededError(spentUsd, capUsd);
+  }
+}
+
+/**
+ * Compute this tenant's Anthropic spend in the current calendar month
+ * and resolve its cap. Returns both as Decimal so callers (cap check,
+ * alert helper) can do their own comparisons without re-querying.
+ */
+async function computeMonthlySpend(tenantId: string): Promise<{
+  spentUsd: Decimal;
+  capUsd: Decimal;
+}> {
   // Cap: tenant.monthlyAiSpendCapUsd or env default.
   const tenant = await prisma.tenant.findUnique({
     where: { id: tenantId },
@@ -179,12 +194,149 @@ async function checkMonthlySpendCap(tenantId: string): Promise<void> {
     spentUsd = spentUsd.plus(inputCost).plus(outputCost);
   }
 
-  if (spentUsd.greaterThanOrEqualTo(capUsd)) {
-    throw new MonthlySpendCapExceededError(spentUsd, capUsd);
-  }
+  return { spentUsd, capUsd };
 }
 
 function startOfCurrentMonthUtc(): Date {
   const now = new Date();
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0));
+}
+
+function currentMonthKey(): string {
+  const now = new Date();
+  const yyyy = now.getUTCFullYear();
+  const mm = String(now.getUTCMonth() + 1).padStart(2, "0");
+  return `${yyyy}-${mm}`;
+}
+
+// ─── Spend-threshold alerts ──────────────────────────────────────────────
+
+/**
+ * Fire at-most-once-per-month alerts when spend crosses the configured
+ * thresholds (80% warning, 100% cap-reached).
+ *
+ * Call AFTER the AI Server Action persists its suggestion row (so this
+ * tenant's spend total reflects the just-completed call). Errors here
+ * are caught + logged — alerting must never fail the user's action.
+ *
+ * Delivery channels:
+ *   1. INSERT into AiSpendAlert (auditable; the unique constraint on
+ *      (tenantId, monthKey, threshold) dedupes — second crossing in
+ *      the same month is a no-op).
+ *   2. console.warn so platform logs surface it.
+ *   3. If AI_ALERT_WEBHOOK_URL is set, POST JSON. Compatible with
+ *      Slack incoming webhooks (just pass the Slack webhook URL).
+ *      5-second timeout; failures swallowed (logged, not thrown).
+ *
+ * Thresholds are hardcoded [80, 100]. Add more by extending the
+ * THRESHOLDS array — the dedup row keeps each crossing independent.
+ */
+const THRESHOLDS = [80, 100] as const;
+const REPO_NAME = "fa-amort";
+
+export async function emitSpendAlertIfThresholdCrossed(
+  tenantId: string
+): Promise<void> {
+  try {
+    const { spentUsd, capUsd } = await computeMonthlySpend(tenantId);
+    if (capUsd.lessThanOrEqualTo(0)) return;
+    const pctOfCap = spentUsd.div(capUsd).mul(100);
+    const monthKey = currentMonthKey();
+
+    for (const threshold of THRESHOLDS) {
+      if (pctOfCap.lessThan(threshold)) continue;
+      // Try to claim the alert slot via the unique constraint. If it
+      // already exists for this month, the create rejects and we skip
+      // — first call across the line wins, every subsequent call no-ops.
+      try {
+        await prisma.aiSpendAlert.create({
+          data: {
+            tenantId,
+            monthKey,
+            threshold,
+            capUsd: capUsd.toFixed(2),
+            spentUsd: spentUsd.toFixed(2),
+          },
+        });
+      } catch (e) {
+        // Unique violation = already alerted this month at this
+        // threshold. That's the success case for dedup.
+        if (isUniqueViolation(e)) continue;
+        throw e;
+      }
+      // Slot claimed. Deliver.
+      const message = formatAlertMessage({
+        tenantId,
+        monthKey,
+        threshold,
+        capUsd,
+        spentUsd,
+      });
+      console.warn(`[ai-spend-alert] ${message}`);
+      await postWebhookBestEffort(message, {
+        tenantId,
+        monthKey,
+        threshold,
+        capUsd: capUsd.toFixed(2),
+        spentUsd: spentUsd.toFixed(2),
+        source: REPO_NAME,
+      });
+    }
+  } catch (e) {
+    // Alerting failures must NEVER bubble up to the user's action.
+    // Log and swallow.
+    console.error("[ai-spend-alert] failed to evaluate thresholds", e);
+  }
+}
+
+function formatAlertMessage(args: {
+  tenantId: string;
+  monthKey: string;
+  threshold: number;
+  capUsd: Decimal;
+  spentUsd: Decimal;
+}): string {
+  const verb = args.threshold >= 100 ? "REACHED" : "approaching";
+  return (
+    `[${REPO_NAME}] Tenant ${args.tenantId} ${verb} ${args.threshold}% ` +
+    `of the Anthropic spend cap for ${args.monthKey} — ` +
+    `$${args.spentUsd.toFixed(2)} of $${args.capUsd.toFixed(2)}.`
+  );
+}
+
+async function postWebhookBestEffort(
+  text: string,
+  payload: Record<string, unknown>
+): Promise<void> {
+  const url = process.env.AI_ALERT_WEBHOOK_URL;
+  if (!url) return;
+  try {
+    // Slack-compatible body: { text } is the minimum incoming-webhook
+    // shape. We also pass structured data alongside so custom endpoints
+    // can use it. Slack silently ignores extra keys.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text, ...payload }),
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (!res.ok) {
+      console.error(
+        `[ai-spend-alert] webhook returned ${res.status}: ${await res
+          .text()
+          .catch(() => "<unreadable>")}`
+      );
+    }
+  } catch (e) {
+    console.error("[ai-spend-alert] webhook POST failed", e);
+  }
+}
+
+function isUniqueViolation(e: unknown): boolean {
+  if (!e || typeof e !== "object") return false;
+  const code = (e as { code?: string }).code;
+  return code === "P2002"; // Prisma's unique-constraint violation code
 }

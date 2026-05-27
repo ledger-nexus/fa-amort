@@ -370,7 +370,41 @@ model Tenant {
   memberships        TenantMembership[]
   aiAssetSuggestions AiAssetSuggestion[]
   rateLimitEvents    RateLimitEvent[]
+  aiSpendAlerts      AiSpendAlert[]
   @@map("tenant")
+}
+
+/// Spend-threshold alerts. One row per (tenant, calendar-month,
+/// threshold) — the unique constraint dedupes so each threshold fires
+/// exactly once per month, regardless of how many calls happen after
+/// the line is crossed.
+///
+/// fa-amort tracks its own spend independently of recon/revenue-rec.
+/// Portfolio-wide aggregation is a known follow-up (would need
+/// cross-repo SQL since each AI suggestion table lives in its owning
+/// repo's namespace).
+///
+/// Delivery channels:
+///   - Always: row persisted (auditable record)
+///   - Always: console.log so deploy-time logs show alerts
+///   - Optional: HTTP POST to AI_ALERT_WEBHOOK_URL (Slack-compatible)
+model AiSpendAlert {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String   @db.Uuid
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  /// Calendar month the alert covers, in YYYY-MM (UTC).
+  monthKey  String
+  /// Percent of cap that triggered the alert. Today: 80 or 100.
+  threshold Int
+  /// Cap value at the moment we fired, in USD.
+  capUsd    Decimal  @db.Decimal(10, 2)
+  /// Spend at the moment we fired, in USD.
+  spentUsd  Decimal  @db.Decimal(10, 2)
+  sentAt    DateTime @default(now())
+
+  @@unique([tenantId, monthKey, threshold])
+  @@index([tenantId, sentAt])
+  @@map("ai_spend_alert")
 }
 
 /// Per-action rate-limit ledger. Each AI Server Action writes one row

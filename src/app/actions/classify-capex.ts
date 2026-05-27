@@ -40,6 +40,7 @@ import {
 } from "@/lib/auth/session";
 import {
   enforceAiBudget,
+  emitSpendAlertIfThresholdCrossed,
   RateLimitExceededError,
   MonthlySpendCapExceededError,
 } from "@/lib/auth/ai-budget";
@@ -120,6 +121,14 @@ export async function classifyCapexAction(
       },
       select: { id: true },
     });
+
+    // Post-call alert evaluation. Fire-and-forget at the call site:
+    // the helper swallows its own errors so we never fail the user's
+    // action on an alert problem. Awaiting (rather than .catch()-ing
+    // and moving on) is intentional — gives the row a chance to land
+    // before revalidatePath, so the audit panel reflects the new
+    // alert immediately.
+    await emitSpendAlertIfThresholdCrossed(tenant.id);
 
     revalidatePath("/ai-capex");
     revalidatePath("/ai-audit");
