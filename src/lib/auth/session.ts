@@ -1,9 +1,11 @@
 // Tenant-aware session helpers. Mirror of recon/revenue-rec/integrations.
 
 import { prisma } from "@/lib/db";
+import type { TenantRole } from "@prisma/client";
 
 export interface CurrentUser { id: string; email: string; displayName: string; }
-export interface CurrentTenant { id: string; slug: string; name: string; role: string; }
+/** Role of the current user in this tenant. See src/lib/auth/policy.ts. */
+export interface CurrentTenant { id: string; slug: string; name: string; role: TenantRole; }
 
 export class NotAuthenticatedError extends Error {
   constructor() { super("Not authenticated"); this.name = "NotAuthenticatedError"; }
