@@ -270,6 +270,20 @@ model AiAssetSuggestion {
   assetId      String?                @db.Uuid
   asset        FixedAsset?            @relation(fields: [assetId], references: [id], onDelete: Cascade)
 
+  /// SECURITY (pen-test pass 4 follow-up): tenantId stamped on every new
+  /// row from the classifier actions' requireCurrentTenant(). Closes the
+  /// "AiAssetSuggestion has no tenant column" gap called out in the
+  /// page-level scoping commits — the AI audit pages can now filter
+  /// pending rows (assetId still null) by tenant directly.
+  ///
+  /// Nullable to keep db push non-destructive; backfill via
+  /// prisma/backfill-ai-asset-suggestion-tenant.sql. Rows with both
+  /// assetId AND tenantId null are unrecoverable — they shipped before
+  /// auth landed and have no provenance; the audit page filters them
+  /// out.
+  tenantId     String?                @db.Uuid
+  tenant       Tenant?                @relation(fields: [tenantId], references: [id])
+
   kind         AiAssetSuggestionKind
   /// Free-form input the model evaluated: a purchase description, invoice
   /// text, news article excerpt, etc.
@@ -287,6 +301,7 @@ model AiAssetSuggestion {
 
   @@index([assetId])
   @@index([kind, createdAt])
+  @@index([tenantId, kind, createdAt])
   @@map("ai_asset_suggestion")
 }
 
@@ -346,10 +361,11 @@ model User {
   @@map("app_user")
 }
 model Tenant {
-  id          String  @id @db.Uuid
-  slug        String  @unique
-  name        String
-  memberships TenantMembership[]
+  id                 String              @id @db.Uuid
+  slug               String              @unique
+  name               String
+  memberships        TenantMembership[]
+  aiAssetSuggestions AiAssetSuggestion[]
   @@map("tenant")
 }
 model TenantMembership {

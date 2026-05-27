@@ -17,14 +17,13 @@ import { UsefulLifeForm } from "./form";
 import { getCurrentTenant } from "@/lib/auth/session";
 
 export default async function AiUsefulLifePage() {
-  // SECURITY (pen-test pass 4 follow-up): tenant-scope via the linked
-  // asset's entity. USEFUL_LIFE rows whose assetId is null (standalone
-  // reassessments not yet tied to an asset) can't be tenant-attributed
-  // because the schema has no tenantId on AiAssetSuggestion yet.
+  // SECURITY (pen-test pass 4 follow-up): tenant-scope via the tenantId
+  // column. Standalone reassessments (assetId null) now show up for
+  // their owning tenant — the previous join was filtering them out.
   const tenant = await getCurrentTenant();
   const recent = await prisma.aiAssetSuggestion.findMany({
     where: tenant
-      ? { kind: "USEFUL_LIFE", asset: { entity: { tenantId: tenant.id } } }
+      ? { kind: "USEFUL_LIFE", tenantId: tenant.id }
       : { id: "__none__" },
     orderBy: { createdAt: "desc" },
     take: 5,

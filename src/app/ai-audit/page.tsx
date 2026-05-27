@@ -18,18 +18,15 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { getCurrentTenant } from "@/lib/auth/session";
 
 export default async function AiAuditPage() {
-  // SECURITY (pen-test pass 4 follow-up): tenant-scope the enumeration.
-  // AiAssetSuggestion has no tenantId column today (the schema note
-  // calls out adding one as a follow-up migration), so we walk through
-  // the linked asset's entity. This filters CAPEX_CLASSIFICATION rows
-  // whose assetId is still null (they ran BEFORE the asset existed) —
-  // we can't tenant-attribute those without the column. Tightest leak
-  // closure we can do without a schema change; document accordingly.
+  // SECURITY (pen-test pass 4 follow-up): tenant-scope via the tenantId
+  // column on AiAssetSuggestion. Pending CAPEX classifications (assetId
+  // null) now show up correctly for their owning tenant. Legacy rows
+  // (tenantId null) are filtered out — backfill via
+  // prisma/backfill-ai-asset-suggestion-tenant.sql closes most of the
+  // gap; orphans without assetId are unrecoverable and stay hidden.
   const tenant = await getCurrentTenant();
   const rows = await prisma.aiAssetSuggestion.findMany({
-    where: tenant
-      ? { asset: { entity: { tenantId: tenant.id } } }
-      : { id: "__none__" },
+    where: tenant ? { tenantId: tenant.id } : { id: "__none__" },
     orderBy: { createdAt: "desc" },
     take: 100,
     select: {

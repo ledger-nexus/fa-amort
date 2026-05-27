@@ -16,21 +16,14 @@ import { ClassifierForm } from "./classifier-form";
 import { getCurrentTenant } from "@/lib/auth/session";
 
 export default async function AiCapexPage() {
-  // SECURITY (pen-test pass 4 follow-up): tenant-scope the "recent
-  // classifications" panel via the linked asset's entity. CAPEX rows
-  // whose assetId is still null (i.e., pending review — they ran
-  // BEFORE the asset existed) are filtered out, because the schema
-  // has no tenantId column on AiAssetSuggestion yet. That's a known
-  // gap; the schema TODO is to add tenantId so we can attribute
-  // unlinked rows too. For now, recent shows only accepted-into-this-
-  // tenant classifications.
+  // SECURITY (pen-test pass 4 follow-up): tenant-scope via the tenantId
+  // column on AiAssetSuggestion. Pending classifications (assetId still
+  // null) now show up — the previous join through asset.entity was
+  // dropping them for this tenant's owner too.
   const tenant = await getCurrentTenant();
   const recent = await prisma.aiAssetSuggestion.findMany({
     where: tenant
-      ? {
-          kind: "CAPEX_CLASSIFICATION",
-          asset: { entity: { tenantId: tenant.id } },
-        }
+      ? { kind: "CAPEX_CLASSIFICATION", tenantId: tenant.id }
       : { id: "__none__" },
     orderBy: { createdAt: "desc" },
     take: 5,
