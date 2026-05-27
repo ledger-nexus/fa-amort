@@ -13,14 +13,21 @@ import { Badge } from "@/components/ui/badge";
 import { formatDate, formatMoney, formatMonth } from "@/lib/utils/format";
 import { projectFullSchedule } from "@/lib/accounting/depreciation";
 import { RunDepreciationForm } from "./run-depreciation-form";
+import { getCurrentTenant } from "@/lib/auth/session";
 
 export default async function FixedAssetDetailPage({
   params,
 }: {
   params: { id: string };
 }) {
-  const asset = await prisma.fixedAsset.findUnique({
-    where: { id: params.id },
+  // SECURITY (pen-test pass 4 follow-up): tenant-scope the read.
+  // Without this, a signed-in user could navigate to /fixed-assets/[any-id]
+  // and see cost, vendor, per-book accumulated depreciation, and the
+  // full forward schedule of another tenant's asset.
+  const tenant = await getCurrentTenant();
+  if (!tenant) notFound();
+  const asset = await prisma.fixedAsset.findFirst({
+    where: { id: params.id, entity: { tenantId: tenant.id } },
     include: {
       entity: { select: { code: true, name: true } },
       vendor: { select: { code: true, displayName: true } },

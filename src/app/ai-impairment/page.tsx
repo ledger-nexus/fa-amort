@@ -21,10 +21,21 @@ import { prisma } from "@/lib/db";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { IMPAIRMENT_MODEL } from "@/lib/ai/impairment-classifier";
 import { ImpairmentForm } from "./form";
+import { getCurrentTenant } from "@/lib/auth/session";
 
 export default async function AiImpairmentPage() {
+  // SECURITY (pen-test pass 4 follow-up): tenant-scope via the linked
+  // asset's entity. IMPAIRMENT_INDICATOR rows whose assetId is null
+  // (free-form text screenings not bound to a single asset) can't be
+  // tenant-attributed yet — schema TODO is tenantId on the table.
+  const tenant = await getCurrentTenant();
   const recent = await prisma.aiAssetSuggestion.findMany({
-    where: { kind: "IMPAIRMENT_INDICATOR" },
+    where: tenant
+      ? {
+          kind: "IMPAIRMENT_INDICATOR",
+          asset: { entity: { tenantId: tenant.id } },
+        }
+      : { id: "__none__" },
     orderBy: { createdAt: "desc" },
     take: 5,
     select: {

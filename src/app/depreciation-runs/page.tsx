@@ -12,6 +12,7 @@ import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
 import { formatDate } from "@/lib/utils/format";
+import { getCurrentTenant } from "@/lib/auth/session";
 
 // Helper inline so we don't depend on revenue-rec's helper.
 function formatRelativeTimeLocal(d: Date | string | null | undefined): string {
@@ -29,11 +30,18 @@ function formatRelativeTimeLocal(d: Date | string | null | undefined): string {
 }
 
 export default async function DepreciationRunsPage() {
+  // SECURITY (pen-test pass 4 follow-up): tenant-scope the enumeration
+  // via entity → tenantId. Without this filter, the list would show
+  // every tenant's depreciation JEs (asset codes, memos, periods).
+  const tenant = await getCurrentTenant();
   const entries = await prisma.journalEntry.findMany({
-    where: {
-      sourceSystem: "fa-amort",
-      sourceRecordType: "DepreciationRun",
-    },
+    where: tenant
+      ? {
+          sourceSystem: "fa-amort",
+          sourceRecordType: "DepreciationRun",
+          entity: { tenantId: tenant.id },
+        }
+      : { id: "__none__" },
     orderBy: { createdAt: "desc" },
     take: 100,
     select: {

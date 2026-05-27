@@ -13,13 +13,25 @@ import { prisma } from "@/lib/db";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { CAPEX_CLASSIFIER_MODEL } from "@/lib/ai/capex-classifier";
 import { ClassifierForm } from "./classifier-form";
+import { getCurrentTenant } from "@/lib/auth/session";
 
 export default async function AiCapexPage() {
-  // Render the 5 most-recent classifications so the page is useful
-  // even before the user runs anything. Pulled server-side so the
-  // first paint includes them.
+  // SECURITY (pen-test pass 4 follow-up): tenant-scope the "recent
+  // classifications" panel via the linked asset's entity. CAPEX rows
+  // whose assetId is still null (i.e., pending review — they ran
+  // BEFORE the asset existed) are filtered out, because the schema
+  // has no tenantId column on AiAssetSuggestion yet. That's a known
+  // gap; the schema TODO is to add tenantId so we can attribute
+  // unlinked rows too. For now, recent shows only accepted-into-this-
+  // tenant classifications.
+  const tenant = await getCurrentTenant();
   const recent = await prisma.aiAssetSuggestion.findMany({
-    where: { kind: "CAPEX_CLASSIFICATION" },
+    where: tenant
+      ? {
+          kind: "CAPEX_CLASSIFICATION",
+          asset: { entity: { tenantId: tenant.id } },
+        }
+      : { id: "__none__" },
     orderBy: { createdAt: "desc" },
     take: 5,
     select: {

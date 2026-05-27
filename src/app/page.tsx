@@ -9,10 +9,23 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
 import { formatDate, formatMoney } from "@/lib/utils/format";
+import { getCurrentTenant } from "@/lib/auth/session";
 
 export default async function DashboardPage() {
+  // SECURITY (pen-test pass 4 follow-up): tenant-scope the dashboard.
+  // Without these filters, the "behind on depreciation" widget and
+  // recent-assets list would surface every tenant's fixed-asset
+  // metadata and accumulated depreciation balances.
+  const tenant = await getCurrentTenant();
+  const assetWhere = tenant
+    ? { entity: { tenantId: tenant.id } }
+    : { id: "__none__" };
+  const bookAttrWhere = tenant
+    ? { asset: { entity: { tenantId: tenant.id } } }
+    : { assetId: "__none__" };
   const [assets, bookAttrs] = await Promise.all([
     prisma.fixedAsset.findMany({
+      where: assetWhere,
       orderBy: { acquisitionDate: "desc" },
       take: 50,
       select: {
@@ -27,6 +40,7 @@ export default async function DashboardPage() {
       },
     }),
     prisma.fixedAssetBookAttributes.findMany({
+      where: bookAttrWhere,
       select: {
         assetId: true,
         bookId: true,

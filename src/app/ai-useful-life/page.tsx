@@ -14,11 +14,18 @@ import { prisma } from "@/lib/db";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { USEFUL_LIFE_MODEL } from "@/lib/ai/useful-life-classifier";
 import { UsefulLifeForm } from "./form";
+import { getCurrentTenant } from "@/lib/auth/session";
 
 export default async function AiUsefulLifePage() {
-  // Pull the latest 5 useful-life suggestions for the panel.
+  // SECURITY (pen-test pass 4 follow-up): tenant-scope via the linked
+  // asset's entity. USEFUL_LIFE rows whose assetId is null (standalone
+  // reassessments not yet tied to an asset) can't be tenant-attributed
+  // because the schema has no tenantId on AiAssetSuggestion yet.
+  const tenant = await getCurrentTenant();
   const recent = await prisma.aiAssetSuggestion.findMany({
-    where: { kind: "USEFUL_LIFE" },
+    where: tenant
+      ? { kind: "USEFUL_LIFE", asset: { entity: { tenantId: tenant.id } } }
+      : { id: "__none__" },
     orderBy: { createdAt: "desc" },
     take: 5,
     select: {
