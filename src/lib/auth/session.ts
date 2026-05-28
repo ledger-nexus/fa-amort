@@ -5,7 +5,16 @@ import type { TenantRole } from "@prisma/client";
 
 export interface CurrentUser { id: string; email: string; displayName: string; }
 /** Role of the current user in this tenant. See src/lib/auth/policy.ts. */
-export interface CurrentTenant { id: string; slug: string; name: string; role: TenantRole; }
+export interface CurrentTenant {
+  id: string;
+  slug: string;
+  name: string;
+  role: TenantRole;
+  /** Stripe plan key. Null when no subscription. */
+  billingPlan: string | null;
+  /** Stripe subscription status. Null when none. */
+  subscriptionStatus: string | null;
+}
 
 export class NotAuthenticatedError extends Error {
   constructor() { super("Not authenticated"); this.name = "NotAuthenticatedError"; }
@@ -39,10 +48,27 @@ export async function getCurrentTenant(): Promise<CurrentTenant | null> {
   if (!u) return null;
   const ms = await prisma.tenantMembership.findMany({
     where: { userId: u.id },
-    include: { tenant: { select: { id: true, slug: true, name: true } } },
+    include: {
+      tenant: {
+        select: {
+          id: true,
+          slug: true,
+          name: true,
+          billingPlan: true,
+          subscriptionStatus: true,
+        },
+      },
+    },
   });
   if (ms.length !== 1) return null;
-  return { id: ms[0].tenant.id, slug: ms[0].tenant.slug, name: ms[0].tenant.name, role: ms[0].role };
+  return {
+    id: ms[0].tenant.id,
+    slug: ms[0].tenant.slug,
+    name: ms[0].tenant.name,
+    role: ms[0].role,
+    billingPlan: ms[0].tenant.billingPlan,
+    subscriptionStatus: ms[0].tenant.subscriptionStatus,
+  };
 }
 
 export async function requireCurrentTenant(): Promise<CurrentTenant> {

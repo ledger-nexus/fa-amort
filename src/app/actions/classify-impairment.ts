@@ -35,6 +35,7 @@ import {
   RateLimitExceededError,
   MonthlySpendCapExceededError,
 } from "@/lib/auth/ai-budget";
+import { requireRepoAccess, RepoNotIncludedError } from "@/lib/auth/repo-access";
 
 export interface ClassifyImpairmentInput {
   sourceText: string;
@@ -62,6 +63,7 @@ export async function classifyImpairmentAction(
     // Anonymous Anthropic spend through this endpoint is closed.
     const user = await requireCurrentUser();
     const tenant = await requireCurrentTenant();
+    requireRepoAccess(tenant);
 
     if (!input.sourceText?.trim()) {
       return { ok: false, message: "Source text is required." };
@@ -127,6 +129,8 @@ export async function classifyImpairmentAction(
     if (e instanceof NoTenantSelectedError)
       return { ok: false, message: e.message };
     if (e instanceof RateLimitExceededError || e instanceof MonthlySpendCapExceededError)
+      return { ok: false, message: e.message };
+    if (e instanceof RepoNotIncludedError)
       return { ok: false, message: e.message };
     return {
       ok: false,

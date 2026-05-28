@@ -33,6 +33,7 @@ import {
   RateLimitExceededError,
   MonthlySpendCapExceededError,
 } from "@/lib/auth/ai-budget";
+import { requireRepoAccess, RepoNotIncludedError } from "@/lib/auth/repo-access";
 
 export interface ClassifyUsefulLifeInput {
   /** When tied to an existing asset, the AiAssetSuggestion gets assetId stamped. */
@@ -62,6 +63,7 @@ export async function classifyUsefulLifeAction(
     // to a foreign asset (subtle but in spec for cross-tenant write).
     const user = await requireCurrentUser();
     const tenant = await requireCurrentTenant();
+    requireRepoAccess(tenant);
 
     const f = input.facts;
     if (!f?.description?.trim()) {
@@ -162,6 +164,8 @@ export async function classifyUsefulLifeAction(
     if (e instanceof NoTenantSelectedError)
       return { ok: false, message: e.message };
     if (e instanceof RateLimitExceededError || e instanceof MonthlySpendCapExceededError)
+      return { ok: false, message: e.message };
+    if (e instanceof RepoNotIncludedError)
       return { ok: false, message: e.message };
     return {
       ok: false,

@@ -44,6 +44,7 @@ import {
   RateLimitExceededError,
   MonthlySpendCapExceededError,
 } from "@/lib/auth/ai-budget";
+import { requireRepoAccess, RepoNotIncludedError } from "@/lib/auth/repo-access";
 
 export interface ClassifyCapexInput {
   invoiceText: string;
@@ -73,6 +74,7 @@ export async function classifyCapexAction(
     // from pen-test pass 4 — this closes it.
     const user = await requireCurrentUser();
     const tenant = await requireCurrentTenant();
+    requireRepoAccess(tenant);
 
     if (!input.invoiceText?.trim()) {
       return { ok: false, message: "Enter a purchase description first." };
@@ -149,6 +151,8 @@ export async function classifyCapexAction(
     if (e instanceof NoTenantSelectedError)
       return { ok: false, message: e.message };
     if (e instanceof RateLimitExceededError || e instanceof MonthlySpendCapExceededError)
+      return { ok: false, message: e.message };
+    if (e instanceof RepoNotIncludedError)
       return { ok: false, message: e.message };
     return {
       ok: false,
