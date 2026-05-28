@@ -49,6 +49,9 @@ export type LedgerErrorCode =
   | "UNKNOWN_ENTITY"
   | "UNKNOWN_BOOK"
   | "UNKNOWN_VENDOR"
+  | "UNKNOWN_ASSET"
+  | "ALREADY_DISPOSED"
+  | "TENANT_SCOPE"
   | "PERIOD_CLOSED"
   | "ACCOUNT_BOOK_SCOPE"
   | "UNAUTHORIZED"
@@ -90,6 +93,12 @@ export function friendlyLedgerError(e: LedgerCoreError): string {
       return `The depreciation accounts aren't in scope for this book. Update the asset's FixedAssetBookAttributes to use accounts that include this book in their bookScope. Detail: ${e.message}`;
     case "INVALID_LINE":
       return `A JE line was rejected as invalid. Detail: ${e.message}`;
+    case "UNKNOWN_ASSET":
+      return `That asset doesn't exist in this tenant (or under that entity). Detail: ${e.message}`;
+    case "ALREADY_DISPOSED":
+      return `This asset is already DISPOSED. You can't dispose it again.`;
+    case "TENANT_SCOPE":
+      return `Tenant mismatch: the asset belongs to a different workspace. This shouldn't be reachable from the UI.`;
     case "BAD_REQUEST":
       return `ledger-core rejected the request as malformed. Detail: ${e.message}`;
     case "INTERNAL_ERROR":
@@ -422,4 +431,99 @@ export async function createFixedAssetViaLedgerCore(
   }
 
   return { id: payload.id, code: payload.code, wasDuplicate: payload.wasDuplicate };
+}
+
+// ─── Dispose FixedAsset (v0.8) ─────────────────────────────────────────────
+//
+// HTTP client to ledger-core's POST /api/internal/fixed-asset/dispose.
+// Used by fa-amort's "Dispose asset" flow on /fixed-assets/[id].
+//
+// The endpoint catches up depreciation through the disposal date,
+// posts the disposal JE per book (Dr Cash / Dr Accum / Cr Asset / +
+// Dr-or-Cr Gain-Loss), and marks the asset DISPOSED — all atomically.
+
+export interface DisposeFixedAssetInput {
+  assetCode: string;
+  entityCode: string;
+  disposalDate: Date;
+  /** Cash received, if any. Defaults to 0 (scrapped / donated). */
+  disposalProceeds?: Decimal | string | number;
+  /** Cash account to debit for the proceeds. Defaults to "1000". */
+  proceedsCashAccountCode?: string;
+  /** Account to debit (loss) or credit (gain). Defaults to "8100". */
+  gainLossAccountCode?: string;
+}
+
+export interface DisposeBookResult {
+  bookCode: string;
+  entryNumber: string;
+  proceeds: string;      // serialized decimal
+  nbvAtDisposal: string; // serialized decimal
+  /** positive = gain, negative = loss */
+  gainLoss: string;
+}
+
+export interface DisposeFixedAssetResult {
+  results: DisposeBookResult[];
+}
+
+export async function disposeFixedAssetViaLedgerCore(
+  input: DisposeFixedAssetInput
+): Promise<DisposeFixedAssetResult> {
+  const baseUrl = process.env.LEDGER_CORE_URL ?? DEFAULT_LEDGER_CORE_URL;
+  const token = process.env.LEDGER_CORE_INTERNAL_TOKEN;
+  if (!token) {
+    throw new LedgerCoreError(
+      "UNAUTHORIZED",
+      "LEDGER_CORE_INTERNAL_TOKEN is not set in fa-amort's env — cannot post disposal"
+    );
+  }
+
+  const body = {
+    assetCode: input.assetCode,
+    entityCode: input.entityCode,
+    disposalDate: input.disposalDate.toISOString().slice(0, 10),
+    disposalProceeds:
+      input.disposalProceeds != null
+        ? serializeDecimal(input.disposalProceeds)
+        : "0",
+    proceedsCashAccountCode: input.proceedsCashAccountCode,
+    gainLossAccountCode: input.gainLossAccountCode,
+  };
+
+  const fetchFn = _fetchOverride ?? fetch;
+  let res: Response;
+  try {
+    res = await fetchFn(`${baseUrl}/api/internal/fixed-asset/dispose`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    throw new LedgerCoreError(
+      "TRANSPORT_ERROR",
+      `Failed to reach ledger-core at ${baseUrl}: ${e instanceof Error ? e.message : "Unknown error"}`
+    );
+  }
+
+  type ApiResponse =
+    | { ok: true; results: DisposeBookResult[] }
+    | { ok: false; error: { code: LedgerErrorCode; message: string } };
+
+  let payload: ApiResponse;
+  try {
+    payload = (await res.json()) as ApiResponse;
+  } catch {
+    throw new LedgerCoreError(
+      "TRANSPORT_ERROR",
+      `ledger-core returned non-JSON response (status ${res.status})`,
+      res.status
+    );
+  }
+
+  if (!payload.ok) {
+    throw new LedgerCoreError(payload.error.code, payload.error.message, res.status);
+  }
+
+  return { results: payload.results };
 }

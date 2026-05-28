@@ -13,6 +13,7 @@ import { Badge } from "@/components/ui/badge";
 import { formatDate, formatMoney, formatMonth } from "@/lib/utils/format";
 import { projectFullSchedule } from "@/lib/accounting/depreciation";
 import { RunDepreciationForm } from "./run-depreciation-form";
+import { DisposeForm } from "./dispose-form";
 import { getCurrentTenant } from "@/lib/auth/session";
 
 export default async function FixedAssetDetailPage({
@@ -165,6 +166,31 @@ export default async function FixedAssetDetailPage({
           )}
         </CardContent>
       </Card>
+
+      {/* Disposal flow. Hidden once the asset is DISPOSED; otherwise
+          renders a "Dispose asset…" button that expands to a form.
+          The action catches up depreciation, posts the disposal JE
+          per book, and marks the asset DISPOSED — all atomically. */}
+      {asset.status !== "DISPOSED" && (
+        <DisposeForm
+          assetId={asset.id}
+          assetCode={asset.code}
+          todayIso={new Date().toISOString().slice(0, 10)}
+        />
+      )}
+      {asset.status === "DISPOSED" && (
+        <div className="rounded-md border border-ink-200 bg-ink-50 p-3 text-xs text-ink-600">
+          This asset was disposed
+          {asset.disposalDate
+            ? ` on ${formatDate(asset.disposalDate)}`
+            : ""}
+          . Disposal proceeds:{" "}
+          {asset.disposalProceeds
+            ? `$${asset.disposalProceeds.toString()}`
+            : "(none)"}
+          .
+        </div>
+      )}
 
       {asset.bookAttributes.map((b) => {
         const schedule = projectFullSchedule({
