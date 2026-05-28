@@ -242,35 +242,30 @@ describe("NONE", () => {
   });
 });
 
-// Unsupported methods (v0.2) -------------------------------------------------
+// Unsupported methods ---------------------------------------------------------
+//
+// MACRS_*_HY were added; UNITS_OF_PRODUCTION is still future work.
+// The previous "all MACRS variants throw" test got rewritten when
+// MACRS landed — see tests/macrs.test.ts for the new coverage. This
+// block tracks the remaining unsupported methods.
 
-describe("unsupported methods in v0.1", () => {
-  const unsupportedMethods = [
-    "MACRS_3_HY",
-    "MACRS_5_HY",
-    "MACRS_7_HY",
-    "MACRS_15_HY",
-    "UNITS_OF_PRODUCTION",
-  ] as const;
-
-  for (const method of unsupportedMethods) {
-    it(`${method} throws DepreciationError pointing to v0.2`, () => {
-      expect(() =>
-        runDepreciation({
-          asset: {
-            cost: 10000,
-            salvageValue: 0,
-            usefulLifeMonths: 36,
-            inServiceDate: utc(2026, 1, 1),
-            depreciationMethod: method,
-            accumulatedDepreciation: 0,
-            lastDepreciatedThrough: null,
-          },
-          throughDate: utc(2026, 12, 31),
-        })
-      ).toThrow(DepreciationError);
-    });
-  }
+describe("unsupported methods", () => {
+  it("UNITS_OF_PRODUCTION throws DepreciationError", () => {
+    expect(() =>
+      runDepreciation({
+        asset: {
+          cost: 10000,
+          salvageValue: 0,
+          usefulLifeMonths: 36,
+          inServiceDate: utc(2026, 1, 1),
+          depreciationMethod: "UNITS_OF_PRODUCTION",
+          accumulatedDepreciation: 0,
+          lastDepreciatedThrough: null,
+        },
+        throughDate: utc(2026, 12, 31),
+      })
+    ).toThrow(DepreciationError);
+  });
 });
 
 // Input validation ----------------------------------------------------------
