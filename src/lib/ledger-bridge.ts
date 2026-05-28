@@ -51,6 +51,9 @@ export type LedgerErrorCode =
   | "UNKNOWN_VENDOR"
   | "UNKNOWN_ASSET"
   | "ALREADY_DISPOSED"
+  | "ASSET_DISPOSED"
+  | "IMPAIRMENT_EXCEEDS_NBV"
+  | "NO_AMOUNTS"
   | "TENANT_SCOPE"
   | "PERIOD_CLOSED"
   | "ACCOUNT_BOOK_SCOPE"
@@ -97,6 +100,12 @@ export function friendlyLedgerError(e: LedgerCoreError): string {
       return `That asset doesn't exist in this tenant (or under that entity). Detail: ${e.message}`;
     case "ALREADY_DISPOSED":
       return `This asset is already DISPOSED. You can't dispose it again.`;
+    case "ASSET_DISPOSED":
+      return `This asset is DISPOSED. Impairment only applies to in-service assets — to recognize a disposal loss instead, reverse the disposal first.`;
+    case "IMPAIRMENT_EXCEEDS_NBV":
+      return `The impairment amount exceeds the asset's current NBV on one or more books. Reduce the amount or run depreciation first. Detail: ${e.message}`;
+    case "NO_AMOUNTS":
+      return `No positive impairment amounts were submitted. Enter an amount > 0 for at least one book.`;
     case "TENANT_SCOPE":
       return `Tenant mismatch: the asset belongs to a different workspace. This shouldn't be reachable from the UI.`;
     case "BAD_REQUEST":
@@ -508,6 +517,105 @@ export async function disposeFixedAssetViaLedgerCore(
 
   type ApiResponse =
     | { ok: true; results: DisposeBookResult[] }
+    | { ok: false; error: { code: LedgerErrorCode; message: string } };
+
+  let payload: ApiResponse;
+  try {
+    payload = (await res.json()) as ApiResponse;
+  } catch {
+    throw new LedgerCoreError(
+      "TRANSPORT_ERROR",
+      `ledger-core returned non-JSON response (status ${res.status})`,
+      res.status
+    );
+  }
+
+  if (!payload.ok) {
+    throw new LedgerCoreError(payload.error.code, payload.error.message, res.status);
+  }
+
+  return { results: payload.results };
+}
+
+// ─── Impair FixedAsset (v0.9) ─────────────────────────────────────────────
+//
+// HTTP client to ledger-core's POST /api/internal/fixed-asset/impair.
+// Used by fa-amort's "Measure impairment" flow on /fixed-assets/[id]
+// (typically navigated to from a FLAGGED AI impairment screening).
+//
+// Posts per-book impairment write-downs in one round trip. The
+// substrate catches up depreciation first, then posts each book's
+// loss JE and bumps accumulatedDepreciation.
+
+export interface ImpairFixedAssetInput {
+  assetCode: string;
+  entityCode: string;
+  impairmentDate: Date;
+  /** bookCode -> loss amount (decimal string or number). Omit / 0 to skip a book. */
+  amountByBook: Record<string, string | number>;
+  /** Override the default impairment loss expense account (8200). */
+  impairmentLossAccountCode?: string;
+  /** Optional UUID of the AI screening that triggered this measurement. */
+  sourceSuggestionId?: string;
+}
+
+export interface ImpairmentBookResult {
+  bookCode: string;
+  entryNumber: string;
+  nbvBeforeImpairment: string;
+  lossAmount: string;
+  nbvAfterImpairment: string;
+}
+
+export interface ImpairFixedAssetResult {
+  results: ImpairmentBookResult[];
+}
+
+export async function impairFixedAssetViaLedgerCore(
+  input: ImpairFixedAssetInput
+): Promise<ImpairFixedAssetResult> {
+  const baseUrl = process.env.LEDGER_CORE_URL ?? DEFAULT_LEDGER_CORE_URL;
+  const token = process.env.LEDGER_CORE_INTERNAL_TOKEN;
+  if (!token) {
+    throw new LedgerCoreError(
+      "UNAUTHORIZED",
+      "LEDGER_CORE_INTERNAL_TOKEN is not set in fa-amort's env — cannot post impairment"
+    );
+  }
+
+  // Normalize amounts to strings for stable JSON serialization.
+  const amountByBook: Record<string, string> = {};
+  for (const [bookCode, raw] of Object.entries(input.amountByBook)) {
+    const s = serializeDecimal(raw);
+    if (s != null) amountByBook[bookCode] = s;
+  }
+
+  const body = {
+    assetCode: input.assetCode,
+    entityCode: input.entityCode,
+    impairmentDate: input.impairmentDate.toISOString().slice(0, 10),
+    amountByBook,
+    impairmentLossAccountCode: input.impairmentLossAccountCode,
+    sourceSuggestionId: input.sourceSuggestionId,
+  };
+
+  const fetchFn = _fetchOverride ?? fetch;
+  let res: Response;
+  try {
+    res = await fetchFn(`${baseUrl}/api/internal/fixed-asset/impair`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    throw new LedgerCoreError(
+      "TRANSPORT_ERROR",
+      `Failed to reach ledger-core at ${baseUrl}: ${e instanceof Error ? e.message : "Unknown error"}`
+    );
+  }
+
+  type ApiResponse =
+    | { ok: true; results: ImpairmentBookResult[] }
     | { ok: false; error: { code: LedgerErrorCode; message: string } };
 
   let payload: ApiResponse;

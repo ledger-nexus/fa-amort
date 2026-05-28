@@ -14,12 +14,15 @@ import { formatDate, formatMoney, formatMonth } from "@/lib/utils/format";
 import { projectFullSchedule } from "@/lib/accounting/depreciation";
 import { RunDepreciationForm } from "./run-depreciation-form";
 import { DisposeForm } from "./dispose-form";
+import { ImpairForm } from "./impair-form";
 import { getCurrentTenant } from "@/lib/auth/session";
 
 export default async function FixedAssetDetailPage({
   params,
+  searchParams,
 }: {
   params: { id: string };
+  searchParams: { suggestionId?: string };
 }) {
   // SECURITY (pen-test pass 4 follow-up): tenant-scope the read.
   // Without this, a signed-in user could navigate to /fixed-assets/[any-id]
@@ -167,16 +170,34 @@ export default async function FixedAssetDetailPage({
         </CardContent>
       </Card>
 
-      {/* Disposal flow. Hidden once the asset is DISPOSED; otherwise
-          renders a "Dispose asset…" button that expands to a form.
-          The action catches up depreciation, posts the disposal JE
-          per book, and marks the asset DISPOSED — all atomically. */}
+      {/* Disposal + impairment flows. Hidden once the asset is
+          DISPOSED. The two forms are siblings — dispose closes the
+          asset entirely; impair writes down NBV but keeps the asset
+          IN_SERVICE. */}
       {asset.status !== "DISPOSED" && (
-        <DisposeForm
-          assetId={asset.id}
-          assetCode={asset.code}
-          todayIso={new Date().toISOString().slice(0, 10)}
-        />
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
+          <div className="flex-1">
+            <DisposeForm
+              assetId={asset.id}
+              assetCode={asset.code}
+              todayIso={new Date().toISOString().slice(0, 10)}
+            />
+          </div>
+          <div className="flex-1">
+            <ImpairForm
+              assetId={asset.id}
+              assetCode={asset.code}
+              todayIso={new Date().toISOString().slice(0, 10)}
+              sourceSuggestionId={searchParams.suggestionId}
+              books={asset.bookAttributes.map((b) => ({
+                bookCode: b.book.code,
+                nbv: new Decimal(asset.acquisitionCost.toString())
+                  .minus(new Decimal(b.accumulatedDepreciation.toString()))
+                  .toFixed(2),
+              }))}
+            />
+          </div>
+        </div>
       )}
       {asset.status === "DISPOSED" && (
         <div className="rounded-md border border-ink-200 bg-ink-50 p-3 text-xs text-ink-600">
