@@ -192,6 +192,67 @@ describe("DOUBLE_DECLINING", () => {
     expect(result.periods[2].expenseAmount.toFixed(2)).toBe("1868.89");
   });
 
+  it("crosses over to straight-line when SL would book more than DDB", () => {
+    // 5-month asset, $1000, salvage 0. The crossover bites at month 4:
+    //   DDB by month: 400, 240, 144,  86.40,  ...
+    //   SL  by month: 200, 150, 120, 108.00, ...
+    // At month 4, SL (108) > DDB (86.40) → SL wins. Once SL > DDB it
+    // stays that way; cumulative ties cleanly to (cost - salvage).
+    const result = runDepreciation({
+      asset: {
+        cost: 1000,
+        salvageValue: 0,
+        usefulLifeMonths: 5,
+        inServiceDate: utc(2026, 1, 1),
+        depreciationMethod: "DOUBLE_DECLINING",
+        accumulatedDepreciation: 0,
+        lastDepreciatedThrough: null,
+      },
+      throughDate: endOfMonth(2026, 5),
+    });
+
+    expect(result.periods).toHaveLength(5);
+    expect(result.periods[0].expenseAmount.toFixed(2)).toBe("400.00"); // DDB
+    expect(result.periods[1].expenseAmount.toFixed(2)).toBe("240.00"); // DDB
+    expect(result.periods[2].expenseAmount.toFixed(2)).toBe("144.00"); // DDB
+    expect(result.periods[3].expenseAmount.toFixed(2)).toBe("108.00"); // SL kicks in
+    expect(result.periods[4].expenseAmount.toFixed(2)).toBe("108.00"); // last (residual)
+    expect(result.cumulativeAfter.toFixed(2)).toBe("1000.00");
+  });
+
+  it("fully depreciates a 60-month asset (sum of periods ties to cost - salvage exactly)", () => {
+    // Without crossover, pure DDB would leave a long zero tail at the
+    // salvage floor; with crossover the schedule fully depreciates by
+    // month 60. The last-period residual absorption guarantees the tie
+    // even in the presence of half-even rounding drift.
+    const result = runDepreciation({
+      asset: {
+        cost: 60_000,
+        salvageValue: 1_000,
+        usefulLifeMonths: 60,
+        inServiceDate: utc(2026, 1, 1),
+        depreciationMethod: "DOUBLE_DECLINING",
+        accumulatedDepreciation: 0,
+        lastDepreciatedThrough: null,
+      },
+      throughDate: endOfMonth(2030, 12),
+    });
+
+    expect(result.periods).toHaveLength(60);
+    expect(result.cumulativeAfter.toFixed(2)).toBe("59000.00"); // cost - salvage
+    // No zero-expense months along the way (the crossover keeps booking).
+    for (let i = 0; i < 60; i++) {
+      expect(result.periods[i].expenseAmount.greaterThan(0)).toBe(true);
+    }
+    // Trajectory sanity: months are non-increasing while on DDB, then
+    // FLAT once SL takes over (the SL candidate is recomputed each
+    // month but on the SL-dominated tail it lands at the same value
+    // ± rounding).
+    const m1 = result.periods[0].expenseAmount;
+    const m12 = result.periods[11].expenseAmount;
+    expect(m1.greaterThan(m12)).toBe(true);
+  });
+
   it("floors at salvage value — cumulative never exceeds (cost - salvage)", () => {
     // Small asset with non-trivial salvage — DDB will hit the floor quickly.
     // Cost 1000, salvage 800, life 12 mo → max depreciable = 200

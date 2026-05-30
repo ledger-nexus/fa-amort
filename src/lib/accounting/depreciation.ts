@@ -136,15 +136,29 @@ function straightLineExpense(
 }
 
 /**
- * Compute the per-period expense for DOUBLE_DECLINING on a particular
- * month index. The rate is 2 × (1 / totalMonths). Each month applies
- * that rate to the remaining net book value. Floors at salvage:
- * never books below (cost - salvage) cumulative.
+ * Compute the per-period expense for DOUBLE_DECLINING with the
+ * **straight-line crossover convention** on a particular month index.
  *
- * In practice firms switch from double-declining to straight-line
- * partway through to ensure the asset is fully depreciated by the end
- * of useful life. v0.1 keeps it simple: pure DDB with a hard salvage
- * floor; v0.2 can add the SL crossover.
+ * Mechanics:
+ *
+ *   1. The DDB candidate is `nbvBefore × 2 / totalMonths`.
+ *   2. The SL crossover candidate is the constant amount needed to
+ *      fully depreciate the remaining `(nbv - salvage)` over the
+ *      remaining months: `(nbvBefore - salvage) / monthsRemaining`.
+ *   3. We take the larger of the two each month. This produces the
+ *      standard IRS convention: pure DDB early, then a clean switch to
+ *      SL once SL would book more (because SL becomes monotonically
+ *      ≥ DDB once you cross it, the per-month max picks SL forever
+ *      after — same trajectory as a one-time switch).
+ *   4. The hard salvage floor still applies: cumulative depreciation
+ *      can never exceed `cost - salvage`.
+ *   5. The final month absorbs whatever rounding residual remains so
+ *      the cumulative ties exactly to `(cost - salvage)`. Mirrors the
+ *      straight-line "last period absorbs" policy.
+ *
+ * Why the max(DDB, SL) form rather than tracking a "have we crossed
+ * yet" boolean: it's stateless, makes a re-run from any month
+ * idempotent, and is the same shape MACRS half-year tables encode.
  */
 function doubleDecliningExpense(
   monthIndex: number,
@@ -155,11 +169,45 @@ function doubleDecliningExpense(
 ): Decimal {
   if (monthIndex >= totalMonths) return new Decimal(0);
   const nbvBefore = cost.minus(cumulativeBeforeThisMonth);
-  const rate = new Decimal(2).dividedBy(totalMonths);
-  let expense = nbvBefore.times(rate).toDecimalPlaces(2, Decimal.ROUND_HALF_EVEN);
-  // Floor at salvage — can never depreciate below (cost - salvage) cumulative.
   const maxAllowedCumulative = cost.minus(salvageValue);
   const remainingDepreciable = maxAllowedCumulative.minus(cumulativeBeforeThisMonth);
+
+  // Final month: book whatever is needed to tie cumulative to
+  // (cost - salvage). Same residual-absorption rule as straight-line.
+  // Without this, DDB rounding could leave a fraction-of-a-cent on the
+  // table at end of life.
+  if (monthIndex === totalMonths - 1) {
+    return remainingDepreciable.isNegative()
+      ? new Decimal(0)
+      : remainingDepreciable;
+  }
+
+  // DDB candidate.
+  const rate = new Decimal(2).dividedBy(totalMonths);
+  const ddbCandidate = nbvBefore
+    .times(rate)
+    .toDecimalPlaces(2, Decimal.ROUND_HALF_EVEN);
+
+  // Straight-line crossover candidate: the constant amount that would
+  // exhaust the remaining depreciable base over the remaining months
+  // if we switched to SL right now.
+  const monthsRemaining = totalMonths - monthIndex;
+  const slCandidate =
+    monthsRemaining > 0
+      ? remainingDepreciable
+          .dividedBy(monthsRemaining)
+          .toDecimalPlaces(2, Decimal.ROUND_HALF_EVEN)
+      : new Decimal(0);
+
+  // Take whichever produces the larger deduction. Once SL > DDB it
+  // stays that way (NBV keeps falling, monthsRemaining keeps shrinking
+  // faster than NBV under SL), so the per-month max is equivalent to
+  // a one-time switch.
+  let expense = ddbCandidate.greaterThanOrEqualTo(slCandidate)
+    ? ddbCandidate
+    : slCandidate;
+
+  // Hard salvage floor.
   if (expense.greaterThan(remainingDepreciable)) {
     expense = remainingDepreciable;
   }
