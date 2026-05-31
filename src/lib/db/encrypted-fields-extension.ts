@@ -55,9 +55,18 @@ import {
  * extension transparently encrypts. Order doesn't matter; lookups
  * happen by model + field.
  */
+/**
+ * Encryption mode per column. Defaults to "string" — see
+ * ledger-core's master extension for the full rationale on the
+ * "json" mode (JSON.stringify before AES-GCM; JSON.parse after
+ * decrypt; ciphertext envelope stored as a quoted-string JsonValue).
+ */
+export type EncryptedColumnType = "string" | "json";
+
 export const ENCRYPTED_COLUMNS: ReadonlyArray<{
   model: string;
   field: string;
+  type?: EncryptedColumnType;
 }> = [
   // AiAssetSuggestion.inputText is the free-form text the AI model
   // evaluated when classifying a capex line or scoring an impairment
@@ -74,6 +83,18 @@ export const ENCRYPTED_COLUMNS: ReadonlyArray<{
   // under FixedAsset (the asset itself doesn't have encrypted
   // columns).
   { model: "AiAssetSuggestion", field: "inputText" },
+  // AiAssetSuggestion.outputJson is the model's structured response.
+  // Shape varies by kind (CAPEX_CLASSIFICATION → { decision,
+  // rationale }; USEFUL_LIFE → { years, rationale };
+  // IMPAIRMENT_INDICATOR → { score, rationale }). All three include
+  // a free-text rationale embedding customer / vendor / asset
+  // context. Json mode.
+  //
+  // Audited 2026-05-31: zero filter queries on outputJson. Display
+  // reads happen via /ai-audit (when v0.2 surfaces it) — extension
+  // hands the parsed JsonValue back so existing call sites keep
+  // working without change.
+  { model: "AiAssetSuggestion", field: "outputJson", type: "json" },
   // Party.displayName — READ side. fa-amort doesn't WRITE Party
   // (ledger-core owns it). fa-amort references Party via
   // FixedAsset.vendorPartyId; the `/fixed-assets` page renders
@@ -89,6 +110,14 @@ function isEncryptedColumn(model: string, field: string): boolean {
 
 function fieldsForModel(model: string): string[] {
   return ENCRYPTED_COLUMNS.filter((c) => c.model === model).map((c) => c.field);
+}
+
+/** Returns the encryption mode for a (model, field), or "string" by default. */
+function columnType(model: string, field: string): EncryptedColumnType {
+  const entry = ENCRYPTED_COLUMNS.find(
+    (c) => c.model === model && c.field === field
+  );
+  return entry?.type ?? "string";
 }
 
 /**
@@ -185,6 +214,57 @@ function safeDecrypt(value: unknown): unknown {
       // The ciphertext is in the row but we can't decrypt. Return a
       // sentinel so the application can render "[Encryption error]"
       // rather than crash.
+      return "[encrypted — key not configured]";
+    }
+    if (e instanceof FieldEncryptionError) {
+      return "[encryption error — contact support]";
+    }
+    throw e;
+  }
+}
+
+/**
+ * Encrypt a JsonValue. Mirror of ledger-core's safeEncryptJson —
+ * JSON.stringify, then AES-GCM. Idempotent via looksEncrypted.
+ */
+function safeEncryptJson(value: unknown): unknown {
+  if (value === null || value === undefined) return value;
+  if (typeof value === "string" && looksEncrypted(value)) return value;
+  try {
+    return encryptField(JSON.stringify(value));
+  } catch (e) {
+    if (e instanceof KeyNotConfiguredError) {
+      if (!warnedAboutMissingKey) {
+        console.warn(
+          "[encrypted-fields] FIELD_ENCRYPTION_KEY is not set; Json columns " +
+            "in ENCRYPTED_COLUMNS write plaintext. Set the env var to enable."
+        );
+        warnedAboutMissingKey = true;
+      }
+      return value;
+    }
+    throw e;
+  }
+}
+
+/**
+ * Decrypt a JsonValue read from Prisma. Mirror of ledger-core's
+ * safeDecryptJson — decrypt, JSON.parse to recover the original
+ * JsonValue. Mixed plaintext/ciphertext during rollout passes through.
+ */
+function safeDecryptJson(value: unknown): unknown {
+  if (typeof value !== "string" || value.length === 0) return value;
+  if (!looksEncrypted(value)) return value;
+  try {
+    const plaintext = decryptField(value);
+    if (plaintext === null) return value;
+    try {
+      return JSON.parse(plaintext);
+    } catch {
+      return plaintext;
+    }
+  } catch (e) {
+    if (e instanceof KeyNotConfiguredError) {
       return "[encrypted — key not configured]";
     }
     if (e instanceof FieldEncryptionError) {
@@ -303,15 +383,17 @@ function encryptDataObject(model: string, data: unknown): unknown {
       out[field] = value;
       continue;
     }
+    const type = columnType(model, field);
+    const encrypt = type === "json" ? safeEncryptJson : safeEncrypt;
     // Prisma write-operation values can be `{ set: ... }` for nested
     // update inputs. Unwrap before encrypting and re-wrap on the way
     // out so the underlying generator still recognizes the shape.
-    if (typeof value === "object" && "set" in value) {
+    if (typeof value === "object" && value !== null && "set" in value) {
       const wrapped = value as { set: unknown };
-      out[field] = { set: safeEncrypt(wrapped.set) };
+      out[field] = { set: encrypt(wrapped.set) };
       continue;
     }
-    out[field] = safeEncrypt(value);
+    out[field] = encrypt(value);
   }
 
   // Recurse into nested relation writes. Prisma's $extends query
@@ -368,7 +450,8 @@ function decryptRow<T>(model: string, row: T): T {
     if (!(field in out)) continue;
     const value = out[field];
     if (value === null || value === undefined) continue;
-    out[field] = safeDecrypt(value);
+    const type = columnType(model, field);
+    out[field] = type === "json" ? safeDecryptJson(value) : safeDecrypt(value);
   }
   return out as T;
 }

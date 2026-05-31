@@ -64,10 +64,9 @@ describe("encrypted-fields extension: AiAssetSuggestion (Confidentiality TSC)", 
     // Use assetId: null — AiAssetSuggestion's schema comment
     // explicitly supports this case ("CAPEX_CLASSIFICATION runs
     // BEFORE the asset exists"). tenantId is also nullable on the
-    // schema (legacy rows pre-date the column). We deliberately
-    // skip both here so the fixture is independent of the
-    // FixedAsset-tenantId / dev-DB-out-of-sync gaps; the encryption
-    // assertion stands on its own merits.
+    // schema (legacy rows pre-date the column). The encryption
+    // assertion is independent of whether assetId is set; skipping
+    // both keeps the fixture minimal.
     const created = await prisma.aiAssetSuggestion.create({
       data: {
         kind: "CAPEX_CLASSIFICATION",
@@ -100,6 +99,24 @@ describe("encrypted-fields extension: AiAssetSuggestion (Confidentiality TSC)", 
     });
     expect(s?.inputText).toBe(plaintextInputText);
     expect(s?.modelName).toBe(modelName);
+  });
+
+  it("on-disk outputJson is a STRING ciphertext envelope, not the original object", async () => {
+    const raw = await rawPrisma.aiAssetSuggestion.findUnique({
+      where: { id: suggestionId },
+      select: { outputJson: true },
+    });
+    expect(typeof raw?.outputJson).toBe("string");
+    expect(looksEncrypted(raw?.outputJson as string)).toBe(true);
+  });
+
+  it("app surface decrypts outputJson back into the exact original object", async () => {
+    const { prisma } = await import("@/lib/db");
+    const s = await prisma.aiAssetSuggestion.findUnique({
+      where: { id: suggestionId },
+      select: { outputJson: true },
+    });
+    expect(s?.outputJson).toEqual({ decision: "CAPITALIZE", rationale: "Long-lived asset" });
   });
 });
 
