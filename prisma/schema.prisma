@@ -177,6 +177,12 @@ model JournalEntry {
 
 model FixedAsset {
   id       String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  // SECURITY (pen-test pass 4 follow-up): tenantId mirrored from ledger-core's
+  // authoritative schema (NOT NULL in the DB). Closes the CC6.1 gap symmetric
+  // with what recon shipped for Party — queries scope by tenantId directly
+  // instead of joining through entity.
+  tenantId String      @db.Uuid
+  tenant   Tenant      @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   entityId String      @db.Uuid
   entity   LegalEntity @relation(fields: [entityId], references: [id])
 
@@ -210,6 +216,7 @@ model FixedAsset {
 
   @@unique([entityId, code])
   @@index([entityId, status])
+  @@index([tenantId])
   @@map("fixed_asset")
 }
 
@@ -375,6 +382,7 @@ model Tenant {
   aiAssetSuggestions AiAssetSuggestion[]
   rateLimitEvents    RateLimitEvent[]
   aiSpendAlerts      AiSpendAlert[]
+  fixedAssets        FixedAsset[]
   @@map("tenant")
 }
 

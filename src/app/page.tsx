@@ -21,10 +21,10 @@ export default async function DashboardPage() {
   // Plan gate: fa-amort is Growth+. Banner when not included.
   const access = tenant ? getRepoAccess(tenant) : null;
   const assetWhere = tenant
-    ? { entity: { tenantId: tenant.id } }
+    ? { tenantId: tenant.id }
     : { id: "__none__" };
   const bookAttrWhere = tenant
-    ? { asset: { entity: { tenantId: tenant.id } } }
+    ? { asset: { tenantId: tenant.id } }
     : { assetId: "__none__" };
   const [assets, bookAttrs] = await Promise.all([
     prisma.fixedAsset.findMany({

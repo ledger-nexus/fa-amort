@@ -90,7 +90,7 @@ export async function disposeAssetAction(
     const asset = await prisma.fixedAsset.findFirst({
       where: {
         id: input.assetId,
-        entity: { tenantId: tenant.id },
+        tenantId: tenant.id,
       },
       select: {
         id: true,

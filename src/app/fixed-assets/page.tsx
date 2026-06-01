@@ -17,7 +17,7 @@ export default async function FixedAssetsListPage() {
   // assets with cost, accumulated depreciation, and entity codes.
   const tenant = await getCurrentTenant();
   const assets = await prisma.fixedAsset.findMany({
-    where: tenant ? { entity: { tenantId: tenant.id } } : { id: "__none__" },
+    where: tenant ? { tenantId: tenant.id } : { id: "__none__" },
     orderBy: [{ entity: { code: "asc" } }, { code: "asc" }],
     select: {
       id: true,

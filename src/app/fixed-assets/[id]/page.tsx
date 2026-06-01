@@ -31,7 +31,7 @@ export default async function FixedAssetDetailPage({
   const tenant = await getCurrentTenant();
   if (!tenant) notFound();
   const asset = await prisma.fixedAsset.findFirst({
-    where: { id: params.id, entity: { tenantId: tenant.id } },
+    where: { id: params.id, tenantId: tenant.id },
     include: {
       entity: { select: { code: true, name: true } },
       vendor: { select: { code: true, displayName: true } },

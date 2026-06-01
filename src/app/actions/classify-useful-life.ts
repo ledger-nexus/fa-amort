@@ -89,7 +89,7 @@ export async function classifyUsefulLifeAction(
     // Verify assetId belongs to this tenant if supplied.
     if (input.assetId) {
       const asset = await prisma.fixedAsset.findFirst({
-        where: { id: input.assetId, entity: { tenantId: tenant.id } },
+        where: { id: input.assetId, tenantId: tenant.id },
         select: { id: true },
       });
       if (!asset) {
