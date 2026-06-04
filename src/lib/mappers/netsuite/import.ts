@@ -21,11 +21,18 @@
 //
 // Resume-from-NetSuite-history pattern:
 //   The pure mapper carries forward `accumulated_depreciation` and
-//   `placed_in_service_date` into bookAttributes. After import, the
-//   asset's `lastDepreciatedThrough` is NOT set — the caller can
-//   compute it from accumulated/(monthly expense) and update
-//   separately if desired. This keeps the importer narrowly scoped
-//   to data ingest, not depreciation re-projection.
+//   `placed_in_service_date` into bookAttributes. By default the
+//   importer ALSO calls computeResumeFromHistory and writes
+//   `lastDepreciatedThrough` so the next runDepreciation call resumes
+//   from where NetSuite left off — without double-counting history.
+//
+//   STRAIGHT_LINE assets are resumable. Non-linear methods
+//   (DOUBLE_DECLINING / MACRS_*) leave lastDepreciatedThrough null
+//   and a warning is added to the result; caller can either accept
+//   the engine's full replay from inServiceDate OR manually advance.
+//
+//   Pass options.skipResumeFromHistory=true to opt out (e.g., for
+//   tests that want to isolate the import behavior).
 
 import type { PrismaClient } from "@prisma/client";
 import {
@@ -34,6 +41,7 @@ import {
   type MappedFixedAsset,
   type MapNsFixedAssetOptions,
 } from "./fixed-asset";
+import { computeResumeFromHistory } from "./resume-from-history";
 
 export interface ImportNsFixedAssetsInput {
   tenantId: string;
@@ -56,12 +64,22 @@ export interface ImportNsFixedAssetsInput {
    * Throws at import time if both are absent for a row.
    */
   defaultEntityCode?: string;
+  /**
+   * Opt out of the auto-resume-from-history step. Default: false (the
+   * importer DOES auto-compute + write lastDepreciatedThrough for
+   * STRAIGHT_LINE assets with non-zero accumulated_depreciation).
+   * Set to true if you want the imported assets to start fresh from
+   * inServiceDate on the next runDepreciation call.
+   */
+  skipResumeFromHistory?: boolean;
 }
 
 export interface ImportNsFixedAssetsResult {
   assetsCreated: number;
   assetsSkipped: number;
   bookAttributesCreated: number;
+  /** Count of bookAttributes rows where lastDepreciatedThrough was set via resume-from-history. */
+  resumeFromHistoryApplied: number;
   errors: Array<{ nsAssetId: string; message: string }>;
   warnings: Array<{ nsAssetId: string; message: string }>;
 }
@@ -81,6 +99,7 @@ export async function importNsFixedAssets(
     assetsCreated: 0,
     assetsSkipped: 0,
     bookAttributesCreated: 0,
+    resumeFromHistoryApplied: 0,
     errors: [],
     warnings: [],
   };
@@ -125,6 +144,45 @@ export async function importNsFixedAssets(
           nsAssetId,
           message: ba.unmappedMethodNote,
         });
+      }
+
+      // Resume-from-history: compute + persist lastDepreciatedThrough
+      // so the next runDepreciation doesn't replay NetSuite's history.
+      if (!input.skipResumeFromHistory && !created.skipped && ba) {
+        const resume = computeResumeFromHistory({
+          inServiceDate: ba.inServiceDate,
+          acquisitionCost: mapped.acquisitionCost,
+          salvageValue: ba.salvageValue,
+          usefulLifeMonths: ba.usefulLifeMonths,
+          depreciationMethod: ba.depreciationMethod,
+          accumulatedDepreciation: ba.accumulatedDepreciation,
+        });
+        if (resume.lastDepreciatedThrough) {
+          await prisma.fixedAssetBookAttributes.updateMany({
+            where: {
+              asset: {
+                sourceSystem: "NETSUITE",
+                sourceRecordType: "FixedAsset",
+                sourceRecordId: nsAssetId,
+              },
+              book: { code: ba.bookCode },
+            },
+            data: { lastDepreciatedThrough: resume.lastDepreciatedThrough },
+          });
+          result.resumeFromHistoryApplied += 1;
+        } else if (resume.reason) {
+          // Only surface as a warning if the method was actually trying
+          // to resume (accumulated > 0) but couldn't. The "accumulated
+          // is 0" reason is benign — the asset really does need to start
+          // from inServiceDate.
+          const accum = Number(ba.accumulatedDepreciation);
+          if (accum > 0 && ba.depreciationMethod !== "NONE") {
+            result.warnings.push({
+              nsAssetId,
+              message: `resume-from-history skipped: ${resume.reason}`,
+            });
+          }
+        }
       }
     } catch (e) {
       result.errors.push({

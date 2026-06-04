@@ -323,3 +323,110 @@ dbDescribe("importNsFixedAssets — disposal", () => {
     expect(ext.gainLoss).toBe(1500);
   });
 });
+
+dbDescribe("importNsFixedAssets — resume-from-history wiring", () => {
+  it("auto-sets lastDepreciatedThrough for STRAIGHT_LINE asset with non-zero accumulated", async () => {
+    // $10k cost, $1k salvage, 36 month life, $4500 accumulated → 18 months elapsed.
+    // inServiceDate = 2024-02-01 → last booked period ends 2025-07-31.
+    const r = await importNsFixedAssets(prisma, {
+      tenantId,
+      assets: [
+        makeAsset("rfh-sl", {
+          depreciation_method: "Straight Line",
+          accumulated_depreciation: 4500,
+          original_cost: 10000,
+          residual_value: 1000,
+          useful_life_months: 36,
+          placed_in_service_date: "2024-02-01",
+        }),
+      ],
+      mapperOptions: { bookCode: TEST_BOOK_CODE },
+      defaultEntityCode: TEST_ENTITY_CODE,
+    });
+
+    expect(r.errors).toEqual([]);
+    expect(r.resumeFromHistoryApplied).toBe(1);
+
+    const asset = await prisma.fixedAsset.findFirstOrThrow({
+      where: { sourceRecordId: `${TEST_PREFIX}-rfh-sl` },
+      include: { bookAttributes: true },
+    });
+    const ba = asset.bookAttributes[0]!;
+    expect(ba.lastDepreciatedThrough?.toISOString().slice(0, 10)).toBe(
+      "2025-07-31"
+    );
+  });
+
+  it("leaves lastDepreciatedThrough null for STRAIGHT_LINE asset with zero accumulated (and no warning)", async () => {
+    const r = await importNsFixedAssets(prisma, {
+      tenantId,
+      assets: [
+        makeAsset("rfh-zero", {
+          depreciation_method: "Straight Line",
+          accumulated_depreciation: 0,
+        }),
+      ],
+      mapperOptions: { bookCode: TEST_BOOK_CODE },
+      defaultEntityCode: TEST_ENTITY_CODE,
+    });
+
+    expect(r.errors).toEqual([]);
+    expect(r.warnings).toEqual([]);
+    expect(r.resumeFromHistoryApplied).toBe(0);
+
+    const asset = await prisma.fixedAsset.findFirstOrThrow({
+      where: { sourceRecordId: `${TEST_PREFIX}-rfh-zero` },
+      include: { bookAttributes: true },
+    });
+    expect(asset.bookAttributes[0]!.lastDepreciatedThrough).toBeNull();
+  });
+
+  it("emits warning when DOUBLE_DECLINING asset has accumulated > 0 (cannot resume)", async () => {
+    const r = await importNsFixedAssets(prisma, {
+      tenantId,
+      assets: [
+        makeAsset("rfh-ddb", {
+          depreciation_method: "Double Declining Balance",
+          accumulated_depreciation: 4500,
+        }),
+      ],
+      mapperOptions: { bookCode: TEST_BOOK_CODE },
+      defaultEntityCode: TEST_ENTITY_CODE,
+    });
+
+    expect(r.errors).toEqual([]);
+    expect(r.resumeFromHistoryApplied).toBe(0);
+    expect(r.warnings).toHaveLength(1);
+    expect(r.warnings[0]!.message).toMatch(/non-linear|DOUBLE_DECLINING/);
+
+    const asset = await prisma.fixedAsset.findFirstOrThrow({
+      where: { sourceRecordId: `${TEST_PREFIX}-rfh-ddb` },
+      include: { bookAttributes: true },
+    });
+    expect(asset.bookAttributes[0]!.lastDepreciatedThrough).toBeNull();
+  });
+
+  it("skipResumeFromHistory=true leaves lastDepreciatedThrough null even for resumable inputs", async () => {
+    const r = await importNsFixedAssets(prisma, {
+      tenantId,
+      assets: [
+        makeAsset("rfh-skip", {
+          depreciation_method: "Straight Line",
+          accumulated_depreciation: 4500,
+        }),
+      ],
+      mapperOptions: { bookCode: TEST_BOOK_CODE },
+      defaultEntityCode: TEST_ENTITY_CODE,
+      skipResumeFromHistory: true,
+    });
+
+    expect(r.resumeFromHistoryApplied).toBe(0);
+    expect(r.warnings).toEqual([]); // explicitly opted out — no warning
+
+    const asset = await prisma.fixedAsset.findFirstOrThrow({
+      where: { sourceRecordId: `${TEST_PREFIX}-rfh-skip` },
+      include: { bookAttributes: true },
+    });
+    expect(asset.bookAttributes[0]!.lastDepreciatedThrough).toBeNull();
+  });
+});
