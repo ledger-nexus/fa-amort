@@ -1,17 +1,17 @@
 // Contract tests for the DSR fa-attribution helper.
 //
-// fa-amort has no user-attribution columns on its owned models
-// (FixedAsset, FixedAssetBookAttributes, AiAssetSuggestion). The
-// helper returns honest zeros + delegates real attribution to
-// ledger-core's audit_log. See the SCHEMA GAP note in
-// `src/lib/privacy/fa-attribution.ts` for the rationale.
+// As of 2026-06-05 (the attribution-schema migration + this PR), the
+// helper is FULLY WIRED. It issues five COUNT(*) queries against the
+// new attribution columns + returns real numbers. The file kept its
+// historical name (`-stub`) for git-blame continuity, but the contract
+// is now: real counts, not honest-zeros. See the matching integration
+// test at `tests/fa-attribution-wired.test.ts` for non-zero proof.
 //
-// These tests lock the contract: the function does NOT throw, returns
-// a stable shape, all counts are zero today. When the schema gap
-// closes, the integration tests added at that time will assert the
-// non-zero counts.
+// These tests lock the unit-level contract: function is exported,
+// shape is stable, snapshotAt is well-formed, NotImplementedError
+// class still exports for back-compat.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   faAmortAttribution,
   NotImplementedError,
@@ -28,49 +28,82 @@ describe("DSR — fa-amort attribution contract (Privacy TSC)", () => {
     expect(new NotImplementedError("test").name).toBe("NotImplementedError");
   });
 
-  it("does NOT throw when called — returns honest-zero shape", async () => {
-    // The function is now wired (no throw). Real attribution is
-    // delegated to ledger-core's audit_log (see file's SCHEMA GAP note).
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const fakePrisma = {} as any;
-    const result = await faAmortAttribution(fakePrisma, "test-user-id");
+  it("does NOT throw when called — returns wired shape", async () => {
+    // Mock a prisma whose count() returns 0 — proves the function
+    // resolves without explosion when no data matches.
+    const mockPrisma = {
+      fixedAsset: { count: vi.fn().mockResolvedValue(0) },
+      fixedAssetBookAttributes: { count: vi.fn().mockResolvedValue(0) },
+      aiAssetSuggestion: { count: vi.fn().mockResolvedValue(0) },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+    const result = await faAmortAttribution(mockPrisma, "test-user-id");
     expect(result).toBeDefined();
   });
 
-  it("returns all-zero counts today (schema gap — no attribution columns)", async () => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const fakePrisma = {} as any;
-    const result = await faAmortAttribution(fakePrisma, "test-user-id");
-    expect(result.fixedAssetsRegistered).toBe(0);
-    expect(result.depreciationRunsInitiated).toBe(0);
-    expect(result.aiAssetSuggestionsAccepted).toBe(0);
-    expect(result.aiAssetSuggestionsRejected).toBe(0);
-    expect(result.assetDisposalsAuthorized).toBe(0);
+  it("returns the expected count when prisma stubs return non-zero values", async () => {
+    const mockPrisma = {
+      fixedAsset: {
+        count: vi
+          .fn()
+          .mockResolvedValueOnce(7) // createdBy
+          .mockResolvedValueOnce(2), // disposedBy
+      },
+      fixedAssetBookAttributes: {
+        count: vi.fn().mockResolvedValue(11), // lastRunBy
+      },
+      aiAssetSuggestion: {
+        count: vi
+          .fn()
+          .mockResolvedValueOnce(5) // acceptedBy
+          .mockResolvedValueOnce(1), // rejectedBy
+      },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+    const result = await faAmortAttribution(mockPrisma, "test-user-id");
+    expect(result.fixedAssetsRegistered).toBe(7);
+    expect(result.assetDisposalsAuthorized).toBe(2);
+    expect(result.depreciationRunsInitiated).toBe(11);
+    expect(result.aiAssetSuggestionsAccepted).toBe(5);
+    expect(result.aiAssetSuggestionsRejected).toBe(1);
+  });
+
+  it("passes userId to every count where clause", async () => {
+    const calls: Array<{ where: { [k: string]: unknown } }> = [];
+    const captureCount = vi.fn(
+      (args: { where: { [k: string]: unknown } }) => {
+        calls.push(args);
+        return Promise.resolve(0);
+      }
+    );
+    const mockPrisma = {
+      fixedAsset: { count: captureCount },
+      fixedAssetBookAttributes: { count: captureCount },
+      aiAssetSuggestion: { count: captureCount },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+    await faAmortAttribution(mockPrisma, "subject-user-id");
+    // 5 calls — one per attribution count
+    expect(calls).toHaveLength(5);
+    // Each where clause must contain the subject user id under SOME
+    // attribution column key. Defense-in-depth: catches a future
+    // refactor that accidentally drops the userId from a query.
+    const allWhereValues = calls.flatMap((c) => Object.values(c.where));
+    expect(allWhereValues.every((v) => v === "subject-user-id")).toBe(true);
   });
 
   it("returns a valid ISO 8601 snapshotAt timestamp", async () => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const fakePrisma = {} as any;
-    const result = await faAmortAttribution(fakePrisma, "test-user-id");
+    const mockPrisma = {
+      fixedAsset: { count: vi.fn().mockResolvedValue(0) },
+      fixedAssetBookAttributes: { count: vi.fn().mockResolvedValue(0) },
+      aiAssetSuggestion: { count: vi.fn().mockResolvedValue(0) },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+    const result = await faAmortAttribution(mockPrisma, "test-user-id");
     expect(result.snapshotAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
     // Parseable as a Date.
     const t = new Date(result.snapshotAt).getTime();
     expect(Number.isFinite(t)).toBe(true);
-  });
-
-  it("does not actually touch prisma (no DB calls today)", async () => {
-    // Defense-in-depth: in the honest-zero state, the function MUST
-    // NOT crash on a fake prisma. This proves the implementation
-    // isn't accidentally awaiting a real query.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const explodingPrisma = new Proxy({} as any, {
-      get() {
-        throw new Error("prisma should not be touched in honest-zero mode");
-      },
-    });
-    await expect(
-      faAmortAttribution(explodingPrisma, "test-user-id")
-    ).resolves.toBeDefined();
   });
 
   it("FaAmortAttribution interface shape is stable (counts only, no contents)", () => {
@@ -80,7 +113,7 @@ describe("DSR — fa-amort attribution contract (Privacy TSC)", () => {
       aiAssetSuggestionsAccepted: 0,
       aiAssetSuggestionsRejected: 0,
       assetDisposalsAuthorized: 0,
-      snapshotAt: "2026-06-03T00:00:00.000Z",
+      snapshotAt: "2026-06-05T00:00:00.000Z",
     };
     expect(shape.fixedAssetsRegistered).toBe(0);
 
