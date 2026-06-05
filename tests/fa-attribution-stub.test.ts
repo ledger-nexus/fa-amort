@@ -28,6 +28,44 @@ describe("DSR — fa-amort attribution contract (Privacy TSC)", () => {
     expect(new NotImplementedError("test").name).toBe("NotImplementedError");
   });
 
+  it("throws when userId is empty string (13th-pass M2 guard)", async () => {
+    const mockPrisma = {
+      fixedAsset: { count: vi.fn().mockResolvedValue(0) },
+      fixedAssetBookAttributes: { count: vi.fn().mockResolvedValue(0) },
+      aiAssetSuggestion: { count: vi.fn().mockResolvedValue(0) },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+    await expect(faAmortAttribution(mockPrisma, "")).rejects.toThrow(
+      /userId is required/
+    );
+  });
+
+  it("throws when userId is null (13th-pass M2 guard via TS bypass)", async () => {
+    const mockPrisma = {
+      fixedAsset: { count: vi.fn().mockResolvedValue(0) },
+      fixedAssetBookAttributes: { count: vi.fn().mockResolvedValue(0) },
+      aiAssetSuggestion: { count: vi.fn().mockResolvedValue(0) },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+    await expect(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      faAmortAttribution(mockPrisma, null as any)
+    ).rejects.toThrow(/userId is required/);
+  });
+
+  it("throws when userId is undefined (13th-pass M2 guard via TS bypass)", async () => {
+    const mockPrisma = {
+      fixedAsset: { count: vi.fn().mockResolvedValue(0) },
+      fixedAssetBookAttributes: { count: vi.fn().mockResolvedValue(0) },
+      aiAssetSuggestion: { count: vi.fn().mockResolvedValue(0) },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+    await expect(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      faAmortAttribution(mockPrisma, undefined as any)
+    ).rejects.toThrow(/userId is required/);
+  });
+
   it("does NOT throw when called — returns wired shape", async () => {
     // Mock a prisma whose count() returns 0 — proves the function
     // resolves without explosion when no data matches.

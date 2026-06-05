@@ -246,4 +246,48 @@ describe("fa-attribution helper — wired against real columns", () => {
     expect(unrelatedResult.aiAssetSuggestionsAccepted).toBe(0);
     expect(unrelatedResult.aiAssetSuggestionsRejected).toBe(0);
   });
+
+  it("13th-pass L2: strict-equality assertion on a per-run unique userId", async () => {
+    // Use a UUID that is guaranteed unique-per-test-run (Date-derived
+    // hex suffix) so the count CANNOT be inflated by stale data from
+    // prior runs. This catches a hypothetical bug where the helper
+    // accidentally counts foreign-tenant rows or where Prisma's
+    // where-clause matches more broadly than expected. UUIDs must be
+    // pure hex — toString(16) instead of toString(36).
+    const hexSuffix = (Date.now().toString(16) + "0000000000000")
+      .replace(/[^0-9a-f]/g, "0")
+      .slice(0, 12);
+    const UNIQUE_USER_ID = `99999999-aaaa-bbbb-cccc-${hexSuffix}`;
+
+    // Seed exactly 1 asset created by UNIQUE_USER. No other test data
+    // touches this userId; the result MUST be 1.
+    await prisma.fixedAsset.create({
+      data: {
+        tenantId,
+        entityId,
+        code: `FAW-${SUFFIX}-UNIQ`,
+        description: "unique-user asset",
+        acquisitionDate: new Date("2026-01-01"),
+        acquisitionCost: "100.0000",
+        acquisitionCurrencyId: "USD",
+        assetAccountCode: "1500",
+        createdBy: UNIQUE_USER_ID,
+      },
+    });
+
+    const result = await faAmortAttribution(prisma, UNIQUE_USER_ID);
+    // STRICT equality — not >=. Proves no cross-test data leak and no
+    // accidental cross-tenant union.
+    expect(result.fixedAssetsRegistered).toBe(1);
+    expect(result.assetDisposalsAuthorized).toBe(0);
+    expect(result.depreciationRunsInitiated).toBe(0);
+    expect(result.aiAssetSuggestionsAccepted).toBe(0);
+    expect(result.aiAssetSuggestionsRejected).toBe(0);
+  });
+
+  it("13th-pass M2: throws when userId is empty (integration-level)", async () => {
+    await expect(faAmortAttribution(prisma, "")).rejects.toThrow(
+      /userId is required/
+    );
+  });
 });
