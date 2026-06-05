@@ -12,7 +12,12 @@
 // signal trail (an obvious Sentry event on first deploy after wiring).
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { redactPii, PII_FIELDS } from "../src/lib/soc2/redact-pii";
+import {
+  redactPii,
+  PII_FIELDS,
+  stripStackPreamble,
+  sanitizeErrorForCapture,
+} from "../src/lib/soc2/redact-pii";
 import {
   captureError,
   captureMessage,
@@ -81,6 +86,37 @@ describe("redactPii — PII allowlist", () => {
     expect(out.stack).toBeTruthy();
   });
 
+  it("14th-pass H1: strips PII from Error.stack preamble (V8 embeds message verbatim)", () => {
+    // V8 produces stacks like "Error: <message>\n    at functionName (...)".
+    // Without preamble stripping, redactPii(new Error("alice@x.com"))
+    // leaks the email via .stack — a Confidentiality TSC violation.
+    const err = new Error("Failed for user alice@example.com");
+    const out = redactPii(err);
+    expect(out.stack).not.toContain("alice@example.com");
+    // The stack must still have frames so triage is possible.
+    expect(out.stack).toContain("    at ");
+    // And the redaction marker should be present where the message was.
+    expect(out.stack).toContain("[REDACTED]");
+  });
+
+  it("14th-pass H1: stripStackPreamble handles missing/edge-case stacks", () => {
+    expect(stripStackPreamble(undefined)).toBe(undefined);
+    expect(stripStackPreamble("")).toBe("");
+    // Non-V8-shaped stack (no "    at " frames) — pass through unchanged.
+    expect(stripStackPreamble("custom error format")).toBe(
+      "custom error format"
+    );
+    // Multi-line message before the first frame — strip everything
+    // up to the first "    at ".
+    const multiline =
+      "Error: line 1\n  line 2 of message\n    at func (file:1:1)";
+    const out = stripStackPreamble(multiline);
+    expect(out).toContain("[REDACTED]");
+    expect(out).toContain("    at func");
+    expect(out).not.toContain("line 1");
+    expect(out).not.toContain("line 2");
+  });
+
   it("exports PII_FIELDS for audit trail", () => {
     expect(PII_FIELDS).toBeInstanceOf(Set);
     expect(PII_FIELDS.has("email")).toBe(true);
@@ -145,6 +181,61 @@ describe("captureError — Sentry fallback path", () => {
     const serialized = JSON.stringify(args);
     expect(serialized).toContain("errPrimitive");
     expect(serialized).toContain("string-error");
+  });
+
+  it("14th-pass M1: caps err.code at 16 chars (Neon driver embeds host:port in code)", () => {
+    // Simulate a Neon serverless adapter wrapper that embeds the
+    // host:port in .code on connection failures.
+    const err = new Error("boom");
+    (err as { code?: string }).code =
+      "ECONNREFUSED: 10.0.1.42:5432 server-side";
+    captureError(err, { context: "test" });
+    const args = consoleErrorSpy.mock.calls[0];
+    const serialized = JSON.stringify(args);
+    // The IP must not survive — the cap defangs it.
+    expect(serialized).not.toContain("10.0.1.42");
+    expect(serialized).not.toContain(":5432");
+    // The leading 16 chars are kept.
+    expect(serialized).toContain("ECONNREFUSED: 10");
+  });
+});
+
+describe("sanitizeErrorForCapture — Sentry path safety (14th-pass H1)", () => {
+  it("returns non-Errors unchanged", () => {
+    expect(sanitizeErrorForCapture("string-error")).toBe("string-error");
+    expect(sanitizeErrorForCapture(42)).toBe(42);
+    expect(sanitizeErrorForCapture(null)).toBe(null);
+  });
+
+  it("returns a NEW Error (doesn't mutate the caller's err)", () => {
+    const original = new Error("Failed for alice@example.com");
+    const out = sanitizeErrorForCapture(original);
+    // The original is unchanged — caller's catch block can still use it.
+    expect(original.message).toBe("Failed for alice@example.com");
+    expect((out as Error).message).toBe("[REDACTED]");
+    expect(out).not.toBe(original);
+  });
+
+  it("strips PII from the returned Error's .stack", () => {
+    const original = new Error("Failed for alice@example.com");
+    const out = sanitizeErrorForCapture(original) as Error;
+    expect(out.stack).not.toContain("alice@example.com");
+    expect(out.stack).toContain("[REDACTED]");
+  });
+
+  it("preserves Error class identity (instanceof + name)", () => {
+    class MyError extends Error {
+      constructor(msg: string) {
+        super(msg);
+        this.name = "MyError";
+      }
+    }
+    const original = new MyError("buried PII alice@x.com");
+    const out = sanitizeErrorForCapture(original) as Error;
+    // Sentry's grouping reads err.name for de-duplication.
+    expect(out.name).toBe("MyError");
+    // The returned object is still an Error (Sentry expects this).
+    expect(out).toBeInstanceOf(Error);
   });
 });
 

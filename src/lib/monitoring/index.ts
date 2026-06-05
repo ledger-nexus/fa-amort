@@ -49,7 +49,7 @@
 // console.error directly; once this shim is in main + the H1 fix
 // rebases on top, the error path becomes Sentry-grade.
 
-import { redactPii } from "@/lib/soc2/redact-pii";
+import { redactPii, sanitizeErrorForCapture } from "@/lib/soc2/redact-pii";
 
 /**
  * Context passed alongside an error for triage. NEVER include raw user
@@ -137,7 +137,14 @@ export function captureError(err: unknown, context: ErrorContext = {}): void {
 
   const Sentry = getSentryClient();
   if (Sentry) {
-    Sentry.captureException(err, { extra: safeContext });
+    // 14th-pass H1 fix: sanitize the err so Sentry receives a copy
+    // with .message redacted + .stack preamble stripped. Without this,
+    // Sentry serializes err.stack server-side including the original
+    // message ("Error: alice@x.com\n    at ...") — a Confidentiality
+    // TSC leak.
+    Sentry.captureException(sanitizeErrorForCapture(err), {
+      extra: safeContext,
+    });
     return;
   }
 
@@ -149,9 +156,18 @@ export function captureError(err: unknown, context: ErrorContext = {}): void {
   // column values in `.message` and `console.error` would print them.
   // Instead extract err.name + extract a class-only message and let
   // redactPii handle the rest.
+  //
+  // 14th-pass M1 fix: cap err.code length to 16 chars. Some adapter
+  // wrappers (Neon serverless driver) embed host:port in .code on
+  // connection errors. The cap defangs operational PII without
+  // killing Prisma's short error codes ("P2002", "P2025") which fit.
   const summary =
     err instanceof Error
-      ? { errName: err.name, errCode: (err as { code?: string }).code }
+      ? {
+          errName: err.name,
+          errCode: ((err as { code?: unknown }).code as string | undefined)
+            ?.slice(0, 16),
+        }
       : { errPrimitive: String(err) };
   console.error("[monitoring]", { ...safeContext, ...summary });
 }
