@@ -37,6 +37,7 @@ import {
   NotAuthenticatedError,
   NoTenantSelectedError,
 } from "@/lib/auth/session";
+import { requireRepoAccess, RepoNotIncludedError } from "@/lib/auth/repo-access";
 import {
   recordDepreciationViaLedgerCore,
   LedgerCoreError,
@@ -71,6 +72,7 @@ export async function runDepreciationAction(
   try {
     await requireCurrentUser();
     const tenant = await requireCurrentTenant();
+    requireRepoAccess(tenant);
 
     if (!input.assetId) return { ok: false, message: "assetId required" };
     if (!input.bookId) return { ok: false, message: "bookId required" };
@@ -87,7 +89,7 @@ export async function runDepreciationAction(
     const asset = await prisma.fixedAsset.findFirst({
       where: {
         id: input.assetId,
-        entity: { tenantId: tenant.id },
+        tenantId: tenant.id,
       },
       select: {
         id: true,
@@ -190,6 +192,8 @@ export async function runDepreciationAction(
     if (e instanceof NotAuthenticatedError)
       return { ok: false, message: "You must be signed in to run depreciation." };
     if (e instanceof NoTenantSelectedError)
+      return { ok: false, message: e.message };
+    if (e instanceof RepoNotIncludedError)
       return { ok: false, message: e.message };
     if (e instanceof LedgerCoreError) {
       return { ok: false, message: friendlyLedgerError(e) };

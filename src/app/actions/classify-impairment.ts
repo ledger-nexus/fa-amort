@@ -23,6 +23,19 @@ import {
   classifyImpairment,
   type ImpairmentResponse,
 } from "@/lib/ai/impairment-classifier";
+import {
+  requireCurrentUser,
+  requireCurrentTenant,
+  NotAuthenticatedError,
+  NoTenantSelectedError,
+} from "@/lib/auth/session";
+import {
+  enforceAiBudget,
+  emitSpendAlertIfThresholdCrossed,
+  RateLimitExceededError,
+  MonthlySpendCapExceededError,
+} from "@/lib/auth/ai-budget";
+import { requireRepoAccess, RepoNotIncludedError } from "@/lib/auth/repo-access";
 
 export interface ClassifyImpairmentInput {
   sourceText: string;
@@ -46,6 +59,12 @@ export async function classifyImpairmentAction(
   input: ClassifyImpairmentInput
 ): Promise<ClassifyImpairmentState> {
   try {
+    // SECURITY (pen-test pass 4 follow-up): same gate as capex.
+    // Anonymous Anthropic spend through this endpoint is closed.
+    const user = await requireCurrentUser();
+    const tenant = await requireCurrentTenant();
+    requireRepoAccess(tenant);
+
     if (!input.sourceText?.trim()) {
       return { ok: false, message: "Source text is required." };
     }
@@ -57,11 +76,18 @@ export async function classifyImpairmentAction(
       };
     }
 
+    await enforceAiBudget({
+      tenantId: tenant.id,
+      userId: user.id,
+      action: "classifyImpairment",
+    });
+
     const result = await classifyImpairment(input.sourceText);
 
     const stored = await prisma.aiAssetSuggestion.create({
       data: {
         kind: "IMPAIRMENT_INDICATOR",
+        tenantId: tenant.id,
         // No asset attachment — impairment screening operates on text,
         // not a specific FixedAsset row.
         inputText: input.sourceLabel
@@ -82,6 +108,8 @@ export async function classifyImpairmentAction(
       select: { id: true },
     });
 
+    await emitSpendAlertIfThresholdCrossed(tenant.id);
+
     revalidatePath("/ai-impairment");
     revalidatePath("/ai-audit");
 
@@ -96,6 +124,14 @@ export async function classifyImpairmentAction(
       latencyMs: result.latencyMs,
     };
   } catch (e) {
+    if (e instanceof NotAuthenticatedError)
+      return { ok: false, message: "You must be signed in." };
+    if (e instanceof NoTenantSelectedError)
+      return { ok: false, message: e.message };
+    if (e instanceof RateLimitExceededError || e instanceof MonthlySpendCapExceededError)
+      return { ok: false, message: e.message };
+    if (e instanceof RepoNotIncludedError)
+      return { ok: false, message: e.message };
     return {
       ok: false,
       message: e instanceof Error ? e.message : "Screening failed",
@@ -121,6 +157,15 @@ export async function decideImpairmentAction(
   input: DecideImpairmentInput
 ): Promise<DecideImpairmentState> {
   try {
+    // SECURITY (pen-test pass 4 follow-up): the decision write is a
+    // privileged stamp on a row that can carry sensitive screening
+    // text. Tenant-scope the lookup so a foreign caller can't decide
+    // (and thereby append decidedBy / notes to) another tenant's
+    // suggestion. Pre-existing rows with tenantId null are unrecoverable
+    // and refused.
+    await requireCurrentUser();
+    const tenant = await requireCurrentTenant();
+
     if (!input.suggestionId) {
       return { ok: false, message: "suggestionId is required" };
     }
@@ -130,8 +175,8 @@ export async function decideImpairmentAction(
         message: 'decision must be "FLAGGED" or "DISMISSED"',
       };
     }
-    const suggestion = await prisma.aiAssetSuggestion.findUnique({
-      where: { id: input.suggestionId },
+    const suggestion = await prisma.aiAssetSuggestion.findFirst({
+      where: { id: input.suggestionId, tenantId: tenant.id },
       select: { kind: true, outputJson: true },
     });
     if (!suggestion) {
@@ -166,6 +211,10 @@ export async function decideImpairmentAction(
           : "Dismissed. Audit row stays as proof of review.",
     };
   } catch (e) {
+    if (e instanceof NotAuthenticatedError)
+      return { ok: false, message: "You must be signed in." };
+    if (e instanceof NoTenantSelectedError)
+      return { ok: false, message: e.message };
     return { ok: false, message: e instanceof Error ? e.message : "Unknown error" };
   }
 }

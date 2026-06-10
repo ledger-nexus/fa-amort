@@ -13,14 +13,25 @@ import { Badge } from "@/components/ui/badge";
 import { formatDate, formatMoney, formatMonth } from "@/lib/utils/format";
 import { projectFullSchedule } from "@/lib/accounting/depreciation";
 import { RunDepreciationForm } from "./run-depreciation-form";
+import { DisposeForm } from "./dispose-form";
+import { ImpairForm } from "./impair-form";
+import { getCurrentTenant } from "@/lib/auth/session";
 
 export default async function FixedAssetDetailPage({
   params,
+  searchParams,
 }: {
   params: { id: string };
+  searchParams: { suggestionId?: string };
 }) {
-  const asset = await prisma.fixedAsset.findUnique({
-    where: { id: params.id },
+  // SECURITY (pen-test pass 4 follow-up): tenant-scope the read.
+  // Without this, a signed-in user could navigate to /fixed-assets/[any-id]
+  // and see cost, vendor, per-book accumulated depreciation, and the
+  // full forward schedule of another tenant's asset.
+  const tenant = await getCurrentTenant();
+  if (!tenant) notFound();
+  const asset = await prisma.fixedAsset.findFirst({
+    where: { id: params.id, tenantId: tenant.id },
     include: {
       entity: { select: { code: true, name: true } },
       vendor: { select: { code: true, displayName: true } },
@@ -158,6 +169,49 @@ export default async function FixedAssetDetailPage({
           )}
         </CardContent>
       </Card>
+
+      {/* Disposal + impairment flows. Hidden once the asset is
+          DISPOSED. The two forms are siblings — dispose closes the
+          asset entirely; impair writes down NBV but keeps the asset
+          IN_SERVICE. */}
+      {asset.status !== "DISPOSED" && (
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
+          <div className="flex-1">
+            <DisposeForm
+              assetId={asset.id}
+              assetCode={asset.code}
+              todayIso={new Date().toISOString().slice(0, 10)}
+            />
+          </div>
+          <div className="flex-1">
+            <ImpairForm
+              assetId={asset.id}
+              assetCode={asset.code}
+              todayIso={new Date().toISOString().slice(0, 10)}
+              sourceSuggestionId={searchParams.suggestionId}
+              books={asset.bookAttributes.map((b) => ({
+                bookCode: b.book.code,
+                nbv: new Decimal(asset.acquisitionCost.toString())
+                  .minus(new Decimal(b.accumulatedDepreciation.toString()))
+                  .toFixed(2),
+              }))}
+            />
+          </div>
+        </div>
+      )}
+      {asset.status === "DISPOSED" && (
+        <div className="rounded-md border border-ink-200 bg-ink-50 p-3 text-xs text-ink-600">
+          This asset was disposed
+          {asset.disposalDate
+            ? ` on ${formatDate(asset.disposalDate)}`
+            : ""}
+          . Disposal proceeds:{" "}
+          {asset.disposalProceeds
+            ? `$${asset.disposalProceeds.toString()}`
+            : "(none)"}
+          .
+        </div>
+      )}
 
       {asset.bookAttributes.map((b) => {
         const schedule = projectFullSchedule({

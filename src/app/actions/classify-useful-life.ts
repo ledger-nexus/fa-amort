@@ -21,6 +21,19 @@ import {
   type AssetFactSheet,
   type UsefulLifeRecommendation,
 } from "@/lib/ai/useful-life-classifier";
+import {
+  requireCurrentUser,
+  requireCurrentTenant,
+  NotAuthenticatedError,
+  NoTenantSelectedError,
+} from "@/lib/auth/session";
+import {
+  enforceAiBudget,
+  emitSpendAlertIfThresholdCrossed,
+  RateLimitExceededError,
+  MonthlySpendCapExceededError,
+} from "@/lib/auth/ai-budget";
+import { requireRepoAccess, RepoNotIncludedError } from "@/lib/auth/repo-access";
 
 export interface ClassifyUsefulLifeInput {
   /** When tied to an existing asset, the AiAssetSuggestion gets assetId stamped. */
@@ -44,6 +57,14 @@ export async function classifyUsefulLifeAction(
   input: ClassifyUsefulLifeInput
 ): Promise<ClassifyUsefulLifeState> {
   try {
+    // SECURITY (pen-test pass 4 follow-up): same gate as the other
+    // classifiers. If assetId is provided, also verify it belongs to
+    // this tenant — otherwise an attacker could attach the audit row
+    // to a foreign asset (subtle but in spec for cross-tenant write).
+    const user = await requireCurrentUser();
+    const tenant = await requireCurrentTenant();
+    requireRepoAccess(tenant);
+
     const f = input.facts;
     if (!f?.description?.trim()) {
       return { ok: false, message: "Asset description is required." };
@@ -65,6 +86,26 @@ export async function classifyUsefulLifeAction(
       };
     }
 
+    // Verify assetId belongs to this tenant if supplied.
+    if (input.assetId) {
+      const asset = await prisma.fixedAsset.findFirst({
+        where: { id: input.assetId, tenantId: tenant.id },
+        select: { id: true },
+      });
+      if (!asset) {
+        return {
+          ok: false,
+          message: `Asset ${input.assetId} not found in this tenant.`,
+        };
+      }
+    }
+
+    await enforceAiBudget({
+      tenantId: tenant.id,
+      userId: user.id,
+      action: "classifyUsefulLife",
+    });
+
     const result = await classifyUsefulLife(f);
 
     // Build a human-readable inputText so the audit log shows what we asked.
@@ -83,6 +124,7 @@ export async function classifyUsefulLifeAction(
     const stored = await prisma.aiAssetSuggestion.create({
       data: {
         kind: "USEFUL_LIFE",
+        tenantId: tenant.id,
         assetId: input.assetId ?? null,
         inputText,
         outputJson: {
@@ -101,6 +143,8 @@ export async function classifyUsefulLifeAction(
       select: { id: true },
     });
 
+    await emitSpendAlertIfThresholdCrossed(tenant.id);
+
     revalidatePath("/ai-useful-life");
     revalidatePath("/ai-audit");
 
@@ -115,6 +159,14 @@ export async function classifyUsefulLifeAction(
       latencyMs: result.latencyMs,
     };
   } catch (e) {
+    if (e instanceof NotAuthenticatedError)
+      return { ok: false, message: "You must be signed in." };
+    if (e instanceof NoTenantSelectedError)
+      return { ok: false, message: e.message };
+    if (e instanceof RateLimitExceededError || e instanceof MonthlySpendCapExceededError)
+      return { ok: false, message: e.message };
+    if (e instanceof RepoNotIncludedError)
+      return { ok: false, message: e.message };
     return {
       ok: false,
       message: e instanceof Error ? e.message : "Classification failed",

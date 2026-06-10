@@ -177,6 +177,12 @@ model JournalEntry {
 
 model FixedAsset {
   id       String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  // SECURITY (pen-test pass 4 follow-up): tenantId mirrored from ledger-core's
+  // authoritative schema (NOT NULL in the DB). Closes the CC6.1 gap symmetric
+  // with what recon shipped for Party — queries scope by tenantId directly
+  // instead of joining through entity.
+  tenantId String      @db.Uuid
+  tenant   Tenant      @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   entityId String      @db.Uuid
   entity   LegalEntity @relation(fields: [entityId], references: [id])
 
@@ -210,6 +216,7 @@ model FixedAsset {
 
   @@unique([entityId, code])
   @@index([entityId, status])
+  @@index([tenantId])
   @@map("fixed_asset")
 }
 
@@ -270,6 +277,20 @@ model AiAssetSuggestion {
   assetId      String?                @db.Uuid
   asset        FixedAsset?            @relation(fields: [assetId], references: [id], onDelete: Cascade)
 
+  /// SECURITY (pen-test pass 4 follow-up): tenantId stamped on every new
+  /// row from the classifier actions' requireCurrentTenant(). Closes the
+  /// "AiAssetSuggestion has no tenant column" gap called out in the
+  /// page-level scoping commits — the AI audit pages can now filter
+  /// pending rows (assetId still null) by tenant directly.
+  ///
+  /// Nullable to keep db push non-destructive; backfill via
+  /// prisma/backfill-ai-asset-suggestion-tenant.sql. Rows with both
+  /// assetId AND tenantId null are unrecoverable — they shipped before
+  /// auth landed and have no provenance; the audit page filters them
+  /// out.
+  tenantId     String?                @db.Uuid
+  tenant       Tenant?                @relation(fields: [tenantId], references: [id])
+
   kind         AiAssetSuggestionKind
   /// Free-form input the model evaluated: a purchase description, invoice
   /// text, news article excerpt, etc.
@@ -287,6 +308,7 @@ model AiAssetSuggestion {
 
   @@index([assetId])
   @@index([kind, createdAt])
+  @@index([tenantId, kind, createdAt])
   @@map("ai_asset_suggestion")
 }
 
@@ -346,18 +368,107 @@ model User {
   @@map("app_user")
 }
 model Tenant {
-  id          String  @id @db.Uuid
-  slug        String  @unique
-  name        String
-  memberships TenantMembership[]
+  id                 String              @id @db.Uuid
+  slug               String              @unique
+  name               String
+  /// See ledger-core's Tenant.monthlyAiSpendCapUsd. Read-only here;
+  /// fa-amort never writes this column.
+  monthlyAiSpendCapUsd Decimal?          @db.Decimal(10, 2)
+  /// Mirror of ledger-core's Tenant.billingPlan + subscriptionStatus.
+  /// session.requireRepoAccess() reads these to gate by plan.
+  billingPlan          String?
+  subscriptionStatus   String?
+  memberships        TenantMembership[]
+  aiAssetSuggestions AiAssetSuggestion[]
+  rateLimitEvents    RateLimitEvent[]
+  aiSpendAlerts      AiSpendAlert[]
+  fixedAssets        FixedAsset[]
   @@map("tenant")
 }
+
+/// Spend-threshold alerts. One row per (tenant, calendar-month,
+/// threshold) — the unique constraint dedupes so each threshold fires
+/// exactly once per month, regardless of how many calls happen after
+/// the line is crossed.
+///
+/// fa-amort tracks its own spend independently of recon/revenue-rec.
+/// Portfolio-wide aggregation is a known follow-up (would need
+/// cross-repo SQL since each AI suggestion table lives in its owning
+/// repo's namespace).
+///
+/// Delivery channels:
+///   - Always: row persisted (auditable record)
+///   - Always: console.log so deploy-time logs show alerts
+///   - Optional: HTTP POST to AI_ALERT_WEBHOOK_URL (Slack-compatible)
+model AiSpendAlert {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String   @db.Uuid
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  /// Companion repo that fired the alert ("recon", "revenue-rec",
+  /// "fa-amort"). Part of the unique constraint so each repo
+  /// independently tracks its crossings — the three companion repos
+  /// share this physical table, and without `source` a 80% crossing
+  /// from fa-amort would silently dedupe recon's later 80% crossing
+  /// in the same month.
+  source    String
+  /// Calendar month the alert covers, in YYYY-MM (UTC).
+  monthKey  String
+  /// Percent of cap that triggered the alert. Today: 80 or 100.
+  threshold Int
+  /// Cap value at the moment we fired, in USD.
+  capUsd    Decimal  @db.Decimal(10, 2)
+  /// Spend at the moment we fired, in USD.
+  spentUsd  Decimal  @db.Decimal(10, 2)
+  sentAt    DateTime @default(now())
+
+  @@unique([tenantId, source, monthKey, threshold])
+  @@index([tenantId, sentAt])
+  @@map("ai_spend_alert")
+}
+
+/// Per-action rate-limit ledger. Each AI Server Action writes one row
+/// BEFORE calling Anthropic (success or failure). The helper at
+/// src/lib/auth/ai-budget.ts counts rows in the trailing window
+/// (per tenant + per user) and refuses if either limit is hit.
+///
+/// Why a table and not a counter? Audit trail. We can answer "who
+/// hit the cap, when, on what action" cheaply. Reaping is a periodic
+/// DELETE WHERE createdAt < now() - INTERVAL '7 days' — not done
+/// automatically; add a cron when volume justifies it.
+model RateLimitEvent {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String   @db.Uuid
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  /// Clerk user id (the app_user.id resolved by requireCurrentUser).
+  /// Nullable so internal/cron AI calls (none today, but for v0.3+)
+  /// can still rate-limit at tenant level.
+  userId    String?  @db.Uuid
+  /// Action identifier, e.g. "classifyCapex", "classifyImpairment",
+  /// "classifyUsefulLife". Distinct so per-action limits are possible
+  /// — though v0 lumps them all under one "ai" bucket.
+  action    String
+  createdAt DateTime @default(now())
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, userId, createdAt])
+  @@map("rate_limit_event")
+}
 model TenantMembership {
-  tenantId String @db.Uuid
-  userId   String @db.Uuid
-  role     String
+  tenantId String     @db.Uuid
+  userId   String     @db.Uuid
+  /// Mirror of ledger-core's TenantRole enum. See src/lib/auth/policy.ts.
+  role     TenantRole @default(MEMBER)
   tenant Tenant @relation(fields: [tenantId], references: [id])
   user   User   @relation(fields: [userId], references: [id])
   @@unique([tenantId, userId])
   @@map("tenant_membership")
+}
+
+/// Mirror of ledger-core's TenantRole enum. Must stay in sync —
+/// ledger-core's schema is canonical.
+enum TenantRole {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
 }

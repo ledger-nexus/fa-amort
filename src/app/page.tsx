@@ -9,10 +9,26 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
 import { formatDate, formatMoney } from "@/lib/utils/format";
+import { getCurrentTenant } from "@/lib/auth/session";
+import { getRepoAccess } from "@/lib/auth/repo-access";
 
 export default async function DashboardPage() {
+  // SECURITY (pen-test pass 4 follow-up): tenant-scope the dashboard.
+  // Without these filters, the "behind on depreciation" widget and
+  // recent-assets list would surface every tenant's fixed-asset
+  // metadata and accumulated depreciation balances.
+  const tenant = await getCurrentTenant();
+  // Plan gate: fa-amort is Growth+. Banner when not included.
+  const access = tenant ? getRepoAccess(tenant) : null;
+  const assetWhere = tenant
+    ? { tenantId: tenant.id }
+    : { id: "__none__" };
+  const bookAttrWhere = tenant
+    ? { asset: { tenantId: tenant.id } }
+    : { assetId: "__none__" };
   const [assets, bookAttrs] = await Promise.all([
     prisma.fixedAsset.findMany({
+      where: assetWhere,
       orderBy: { acquisitionDate: "desc" },
       take: 50,
       select: {
@@ -27,6 +43,7 @@ export default async function DashboardPage() {
       },
     }),
     prisma.fixedAssetBookAttributes.findMany({
+      where: bookAttrWhere,
       select: {
         assetId: true,
         bookId: true,
@@ -63,6 +80,20 @@ export default async function DashboardPage() {
 
   return (
     <div className="flex flex-col gap-6">
+      {access && !access.included && (
+        <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3">
+          <div className="text-sm font-medium text-amber-900">
+            fa-amort is not included in your &quot;{access.currentPlan}&quot; plan
+          </div>
+          <p className="mt-1 text-xs text-amber-700">
+            Multi-book depreciation + AI capex / useful-life / impairment
+            classifiers are part of the Growth and Scale tiers. Existing
+            asset data stays visible, but new AI classifications and
+            depreciation runs are refused (or warned in dev). Upgrade at{" "}
+            <code className="font-mono">/admin/billing</code> in ledger-core.
+          </p>
+        </div>
+      )}
       <header>
         <h1 className="text-xl font-semibold text-ink-900">Fixed assets</h1>
         <p className="text-sm text-ink-500">

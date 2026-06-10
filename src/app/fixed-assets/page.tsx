@@ -9,9 +9,15 @@ import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
 import { formatDate, formatMoney } from "@/lib/utils/format";
+import { getCurrentTenant } from "@/lib/auth/session";
 
 export default async function FixedAssetsListPage() {
+  // SECURITY (pen-test pass 4 follow-up): tenant-scope the enumeration.
+  // Without this filter, the list would expose every tenant's fixed
+  // assets with cost, accumulated depreciation, and entity codes.
+  const tenant = await getCurrentTenant();
   const assets = await prisma.fixedAsset.findMany({
+    where: tenant ? { tenantId: tenant.id } : { id: "__none__" },
     orderBy: [{ entity: { code: "asc" } }, { code: "asc" }],
     select: {
       id: true,

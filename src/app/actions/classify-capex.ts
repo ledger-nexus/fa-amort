@@ -32,6 +32,19 @@ import {
   classifyCapex,
   type Classification,
 } from "@/lib/ai/capex-classifier";
+import {
+  requireCurrentUser,
+  requireCurrentTenant,
+  NotAuthenticatedError,
+  NoTenantSelectedError,
+} from "@/lib/auth/session";
+import {
+  enforceAiBudget,
+  emitSpendAlertIfThresholdCrossed,
+  RateLimitExceededError,
+  MonthlySpendCapExceededError,
+} from "@/lib/auth/ai-budget";
+import { requireRepoAccess, RepoNotIncludedError } from "@/lib/auth/repo-access";
 
 export interface ClassifyCapexInput {
   invoiceText: string;
@@ -55,6 +68,14 @@ export async function classifyCapexAction(
   input: ClassifyCapexInput
 ): Promise<ClassifyCapexState> {
   try {
+    // SECURITY (pen-test pass 4 follow-up): require auth + tenant.
+    // This action calls Anthropic (per-tenant cost) and writes an
+    // audit row. Anonymous classifier spend was on the deferred list
+    // from pen-test pass 4 — this closes it.
+    const user = await requireCurrentUser();
+    const tenant = await requireCurrentTenant();
+    requireRepoAccess(tenant);
+
     if (!input.invoiceText?.trim()) {
       return { ok: false, message: "Enter a purchase description first." };
     }
@@ -66,6 +87,15 @@ export async function classifyCapexAction(
       };
     }
 
+    // Rate limit + monthly spend cap. Throws if either is hit;
+    // logs a RateLimitEvent row on success so subsequent calls see
+    // this one in the trailing window.
+    await enforceAiBudget({
+      tenantId: tenant.id,
+      userId: user.id,
+      action: "classifyCapex",
+    });
+
     const result = await classifyCapex(input.invoiceText);
 
     const stored = await prisma.aiAssetSuggestion.create({
@@ -74,6 +104,7 @@ export async function classifyCapexAction(
         // exists. If the human accepts the suggestion and a FixedAsset is
         // created, a separate Server Action backfills the assetId.
         kind: "CAPEX_CLASSIFICATION",
+        tenantId: tenant.id,
         inputText: input.invoiceText,
         outputJson: {
           classification: result.classification,
@@ -93,6 +124,14 @@ export async function classifyCapexAction(
       select: { id: true },
     });
 
+    // Post-call alert evaluation. Fire-and-forget at the call site:
+    // the helper swallows its own errors so we never fail the user's
+    // action on an alert problem. Awaiting (rather than .catch()-ing
+    // and moving on) is intentional — gives the row a chance to land
+    // before revalidatePath, so the audit panel reflects the new
+    // alert immediately.
+    await emitSpendAlertIfThresholdCrossed(tenant.id);
+
     revalidatePath("/ai-capex");
     revalidatePath("/ai-audit");
 
@@ -107,6 +146,14 @@ export async function classifyCapexAction(
       latencyMs: result.latencyMs,
     };
   } catch (e) {
+    if (e instanceof NotAuthenticatedError)
+      return { ok: false, message: "You must be signed in." };
+    if (e instanceof NoTenantSelectedError)
+      return { ok: false, message: e.message };
+    if (e instanceof RateLimitExceededError || e instanceof MonthlySpendCapExceededError)
+      return { ok: false, message: e.message };
+    if (e instanceof RepoNotIncludedError)
+      return { ok: false, message: e.message };
     return {
       ok: false,
       message: e instanceof Error ? e.message : "Classification failed",

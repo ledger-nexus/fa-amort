@@ -21,10 +21,17 @@ import { prisma } from "@/lib/db";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { IMPAIRMENT_MODEL } from "@/lib/ai/impairment-classifier";
 import { ImpairmentForm } from "./form";
+import { getCurrentTenant } from "@/lib/auth/session";
 
 export default async function AiImpairmentPage() {
+  // SECURITY (pen-test pass 4 follow-up): tenant-scope via the tenantId
+  // column. Free-form text screenings (assetId null) now show up for
+  // their owning tenant — the previous asset-join was filtering them out.
+  const tenant = await getCurrentTenant();
   const recent = await prisma.aiAssetSuggestion.findMany({
-    where: { kind: "IMPAIRMENT_INDICATOR" },
+    where: tenant
+      ? { kind: "IMPAIRMENT_INDICATOR", tenantId: tenant.id }
+      : { id: "__none__" },
     orderBy: { createdAt: "desc" },
     take: 5,
     select: {

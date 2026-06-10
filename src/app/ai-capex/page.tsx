@@ -13,13 +13,18 @@ import { prisma } from "@/lib/db";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { CAPEX_CLASSIFIER_MODEL } from "@/lib/ai/capex-classifier";
 import { ClassifierForm } from "./classifier-form";
+import { getCurrentTenant } from "@/lib/auth/session";
 
 export default async function AiCapexPage() {
-  // Render the 5 most-recent classifications so the page is useful
-  // even before the user runs anything. Pulled server-side so the
-  // first paint includes them.
+  // SECURITY (pen-test pass 4 follow-up): tenant-scope via the tenantId
+  // column on AiAssetSuggestion. Pending classifications (assetId still
+  // null) now show up — the previous join through asset.entity was
+  // dropping them for this tenant's owner too.
+  const tenant = await getCurrentTenant();
   const recent = await prisma.aiAssetSuggestion.findMany({
-    where: { kind: "CAPEX_CLASSIFICATION" },
+    where: tenant
+      ? { kind: "CAPEX_CLASSIFICATION", tenantId: tenant.id }
+      : { id: "__none__" },
     orderBy: { createdAt: "desc" },
     take: 5,
     select: {

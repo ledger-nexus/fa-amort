@@ -136,15 +136,29 @@ function straightLineExpense(
 }
 
 /**
- * Compute the per-period expense for DOUBLE_DECLINING on a particular
- * month index. The rate is 2 × (1 / totalMonths). Each month applies
- * that rate to the remaining net book value. Floors at salvage:
- * never books below (cost - salvage) cumulative.
+ * Compute the per-period expense for DOUBLE_DECLINING with the
+ * **straight-line crossover convention** on a particular month index.
  *
- * In practice firms switch from double-declining to straight-line
- * partway through to ensure the asset is fully depreciated by the end
- * of useful life. v0.1 keeps it simple: pure DDB with a hard salvage
- * floor; v0.2 can add the SL crossover.
+ * Mechanics:
+ *
+ *   1. The DDB candidate is `nbvBefore × 2 / totalMonths`.
+ *   2. The SL crossover candidate is the constant amount needed to
+ *      fully depreciate the remaining `(nbv - salvage)` over the
+ *      remaining months: `(nbvBefore - salvage) / monthsRemaining`.
+ *   3. We take the larger of the two each month. This produces the
+ *      standard IRS convention: pure DDB early, then a clean switch to
+ *      SL once SL would book more (because SL becomes monotonically
+ *      ≥ DDB once you cross it, the per-month max picks SL forever
+ *      after — same trajectory as a one-time switch).
+ *   4. The hard salvage floor still applies: cumulative depreciation
+ *      can never exceed `cost - salvage`.
+ *   5. The final month absorbs whatever rounding residual remains so
+ *      the cumulative ties exactly to `(cost - salvage)`. Mirrors the
+ *      straight-line "last period absorbs" policy.
+ *
+ * Why the max(DDB, SL) form rather than tracking a "have we crossed
+ * yet" boolean: it's stateless, makes a re-run from any month
+ * idempotent, and is the same shape MACRS half-year tables encode.
  */
 function doubleDecliningExpense(
   monthIndex: number,
@@ -155,16 +169,162 @@ function doubleDecliningExpense(
 ): Decimal {
   if (monthIndex >= totalMonths) return new Decimal(0);
   const nbvBefore = cost.minus(cumulativeBeforeThisMonth);
-  const rate = new Decimal(2).dividedBy(totalMonths);
-  let expense = nbvBefore.times(rate).toDecimalPlaces(2, Decimal.ROUND_HALF_EVEN);
-  // Floor at salvage — can never depreciate below (cost - salvage) cumulative.
   const maxAllowedCumulative = cost.minus(salvageValue);
   const remainingDepreciable = maxAllowedCumulative.minus(cumulativeBeforeThisMonth);
+
+  // Final month: book whatever is needed to tie cumulative to
+  // (cost - salvage). Same residual-absorption rule as straight-line.
+  // Without this, DDB rounding could leave a fraction-of-a-cent on the
+  // table at end of life.
+  if (monthIndex === totalMonths - 1) {
+    return remainingDepreciable.isNegative()
+      ? new Decimal(0)
+      : remainingDepreciable;
+  }
+
+  // DDB candidate.
+  const rate = new Decimal(2).dividedBy(totalMonths);
+  const ddbCandidate = nbvBefore
+    .times(rate)
+    .toDecimalPlaces(2, Decimal.ROUND_HALF_EVEN);
+
+  // Straight-line crossover candidate: the constant amount that would
+  // exhaust the remaining depreciable base over the remaining months
+  // if we switched to SL right now.
+  const monthsRemaining = totalMonths - monthIndex;
+  const slCandidate =
+    monthsRemaining > 0
+      ? remainingDepreciable
+          .dividedBy(monthsRemaining)
+          .toDecimalPlaces(2, Decimal.ROUND_HALF_EVEN)
+      : new Decimal(0);
+
+  // Take whichever produces the larger deduction. Once SL > DDB it
+  // stays that way (NBV keeps falling, monthsRemaining keeps shrinking
+  // faster than NBV under SL), so the per-month max is equivalent to
+  // a one-time switch.
+  let expense = ddbCandidate.greaterThanOrEqualTo(slCandidate)
+    ? ddbCandidate
+    : slCandidate;
+
+  // Hard salvage floor.
   if (expense.greaterThan(remainingDepreciable)) {
     expense = remainingDepreciable;
   }
   if (expense.isNegative()) expense = new Decimal(0);
   return expense;
+}
+
+// ─── MACRS (Modified Accelerated Cost Recovery System) ───────────────────
+//
+// MACRS is the US tax depreciation method for property placed in service
+// after 1986. The percentages below come from IRS Publication 946,
+// Table A-1 (200% declining balance, half-year convention). These tables
+// already bake in:
+//
+//   - 200% declining balance for the first N-1 years (or N for 15-year)
+//   - Switch to straight-line when SL would produce a larger deduction
+//   - Half-year convention (Year 1 gets a half-year's worth of dep,
+//     so the asset's recovery period spans N+1 calendar years for an
+//     N-year asset)
+//
+// For book-monthly closes we divide each year's annual percentage by 12.
+// Tax filers report MACRS annually (Form 4562); the monthly recognition
+// is a book-only approximation that ties out to the same annual total.
+//
+// recovery period (years) → array of annual percentages (one per
+// calendar year the property is depreciated in, including the half-year
+// stub in Year 1 + Year N+1).
+//
+// Source: IRS Pub 946 (2023 edition), Table A-1.
+const MACRS_HY_TABLE: Record<3 | 5 | 7 | 15, ReadonlyArray<number>> = {
+  3: [33.33, 44.45, 14.81, 7.41],
+  5: [20.00, 32.00, 19.20, 11.52, 11.52, 5.76],
+  7: [14.29, 24.49, 17.49, 12.49, 8.93, 8.92, 8.93, 4.46],
+  15: [
+    5.00, 9.50, 8.55, 7.70, 6.93, 6.23, 5.90, 5.90, 5.91, 5.90, 5.91, 5.90,
+    5.91, 5.90, 5.91, 2.95,
+  ],
+};
+
+function macrsRecoveryYears(method: DepreciationMethod): 3 | 5 | 7 | 15 {
+  switch (method) {
+    case "MACRS_3_HY":  return 3;
+    case "MACRS_5_HY":  return 5;
+    case "MACRS_7_HY":  return 7;
+    case "MACRS_15_HY": return 15;
+    default:
+      throw new DepreciationError(`Not a MACRS method: ${method}`);
+  }
+}
+
+/**
+ * Compute the per-month MACRS expense for a given month index.
+ *
+ * monthIndex is 0-based from in-service date. We translate to a "tax
+ * year index" (0-based): years 0..N correspond to the rows of the
+ * MACRS table. Year 0 gets the half-year-convention small first row
+ * spread across 12 months (so Jan = Year-1-percentage / 12, regardless
+ * of when in the calendar year the asset was placed in service).
+ *
+ * Salvage value is IGNORED on purpose — MACRS does not use a salvage
+ * value (the table already drives the asset to zero cumulative
+ * depreciation, matching tax practice).
+ *
+ * Rounding: each month gets annualPct% / 12 of cost, rounded to 2dp.
+ * The LAST month of each tax year absorbs that year's rounding
+ * residual so the year totals exactly to annualPct% of cost.
+ */
+function macrsExpense(
+  monthIndex: number,
+  method: DepreciationMethod,
+  cost: Decimal
+): Decimal {
+  const recoveryYears = macrsRecoveryYears(method);
+  const table = MACRS_HY_TABLE[recoveryYears];
+
+  // Tax year (0-based) this month falls into. A 5-year asset has
+  // 6 tax years' worth of percentages (Years 1..6); month indexes
+  // 0..71 map to years 0..5 (12 months each).
+  const taxYearIndex = Math.floor(monthIndex / 12);
+  if (taxYearIndex >= table.length) {
+    // Past the recovery period — fully depreciated.
+    return new Decimal(0);
+  }
+
+  const annualPct = new Decimal(table[taxYearIndex]);
+  const annualAmount = cost
+    .times(annualPct)
+    .dividedBy(100)
+    .toDecimalPlaces(2, Decimal.ROUND_HALF_EVEN);
+
+  // Within-year month (0..11).
+  const monthOfYear = monthIndex % 12;
+
+  if (monthOfYear < 11) {
+    // Months 0..10: even share. Floor-rounded so the year-end month
+    // can absorb residual.
+    return annualAmount
+      .dividedBy(12)
+      .toDecimalPlaces(2, Decimal.ROUND_HALF_EVEN);
+  }
+
+  // Month 11 (year-end): absorb residual so the 12-month sum equals
+  // annualAmount exactly.
+  const monthly = annualAmount
+    .dividedBy(12)
+    .toDecimalPlaces(2, Decimal.ROUND_HALF_EVEN);
+  const elevenMonths = monthly.times(11);
+  return annualAmount.minus(elevenMonths);
+}
+
+function isMacrsMethod(m: DepreciationMethod): boolean {
+  return (
+    m === "MACRS_3_HY" ||
+    m === "MACRS_5_HY" ||
+    m === "MACRS_7_HY" ||
+    m === "MACRS_15_HY"
+  );
 }
 
 // ─── Main scheduler ────────────────────────────────────────────────────────
@@ -192,10 +352,11 @@ export function runDepreciation(input: RunDepreciationInput): RunDepreciationRes
 
   if (
     asset.depreciationMethod !== "STRAIGHT_LINE" &&
-    asset.depreciationMethod !== "DOUBLE_DECLINING"
+    asset.depreciationMethod !== "DOUBLE_DECLINING" &&
+    !isMacrsMethod(asset.depreciationMethod)
   ) {
     throw new DepreciationError(
-      `Depreciation method ${asset.depreciationMethod} is not supported in v0.1 (MACRS + units-of-production land in v0.2)`
+      `Depreciation method ${asset.depreciationMethod} is not supported yet (units-of-production lands later)`
     );
   }
 
@@ -209,6 +370,19 @@ export function runDepreciation(input: RunDepreciationInput): RunDepreciationRes
   }
   if (salvage.greaterThan(cost)) {
     throw new DepreciationError("salvageValue cannot exceed cost");
+  }
+
+  // MACRS validation: usefulLifeMonths must match the method's
+  // recovery period × 12. The IRS table is keyed on recovery period,
+  // not the asset's free-form life setting.
+  if (isMacrsMethod(asset.depreciationMethod)) {
+    const recoveryYears = macrsRecoveryYears(asset.depreciationMethod);
+    const expectedMonths = recoveryYears * 12;
+    if (asset.usefulLifeMonths !== expectedMonths) {
+      throw new DepreciationError(
+        `${asset.depreciationMethod} requires usefulLifeMonths=${expectedMonths} (got ${asset.usefulLifeMonths}). MACRS is keyed on the recovery period in IRS Pub 946, not a free-form life.`
+      );
+    }
   }
 
   const inService = startOfMonthUTC(asset.inServiceDate);
@@ -252,8 +426,7 @@ export function runDepreciation(input: RunDepreciationInput): RunDepreciationRes
     let expense: Decimal;
     if (asset.depreciationMethod === "STRAIGHT_LINE") {
       expense = straightLineExpense(monthIndex, asset.usefulLifeMonths, depreciableBase);
-    } else {
-      // DOUBLE_DECLINING
+    } else if (asset.depreciationMethod === "DOUBLE_DECLINING") {
       expense = doubleDecliningExpense(
         monthIndex,
         asset.usefulLifeMonths,
@@ -261,6 +434,13 @@ export function runDepreciation(input: RunDepreciationInput): RunDepreciationRes
         salvage,
         cumulative
       );
+    } else {
+      // MACRS_*_HY — no salvage value in MACRS; cost is the basis.
+      // MACRS recovery period spans MORE than usefulLifeMonths because
+      // of the half-year convention's trailing stub (e.g. 5-year
+      // recovery = 6 calendar years = 72 months). Walk past
+      // usefulLifeMonths up to the end of the table.
+      expense = macrsExpense(monthIndex, asset.depreciationMethod, cost);
     }
 
     cumulative = cumulative.plus(expense);
@@ -304,9 +484,18 @@ export function projectFullSchedule(input: {
 
   const cost = toDecimal(input.cost);
   const salvage = toDecimal(input.salvageValue);
+  // MACRS recovery period spans MORE than usefulLifeMonths because of
+  // the half-year-convention trailing stub (e.g. 5-year MACRS = 6
+  // calendar years of recovery = 72 months, while usefulLifeMonths=60).
+  // For MACRS methods, walk to the end of the table; for SL/DDB, the
+  // last month is usefulLifeMonths - 1.
+  const isMacrs = isMacrsMethod(input.depreciationMethod);
+  const totalMonths = isMacrs
+    ? MACRS_HY_TABLE[macrsRecoveryYears(input.depreciationMethod)].length * 12
+    : input.usefulLifeMonths;
   const finalMonth = addMonthsUTC(
     startOfMonthUTC(input.inServiceDate),
-    input.usefulLifeMonths - 1
+    totalMonths - 1
   );
   const result = runDepreciation({
     asset: {
