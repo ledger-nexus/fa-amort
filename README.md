@@ -23,6 +23,15 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the cross-repo write stor
 - ✅ **UI** (port 3004): dashboard with "behind on depreciation" widget, `/fixed-assets` list, `/fixed-assets/[id]` detail with per-book run form + forward schedule projection, `/depreciation-runs` history.
 - ✅ **22 unit tests** — straight-line splits + rounding residual, salvage value, DDB rate + floor, NONE, unsupported-method errors, input validation, resume from prior accumulated, `projectFullSchedule` totals = depreciable base, 18-month realistic run.
 
+## In flight (PR #14, unmerged)
+
+- 🟡 **NetSuite fixed-asset import pipeline** ([`src/lib/mappers/netsuite/`](src/lib/mappers/netsuite/)) — closes the gap surfaced by [ledger-core PR #40's validator pass](https://github.com/ledger-nexus/ledger-core/pull/40), which showed 87/90 NetSuite Fleet sample assets fully translatable. Four layers:
+  - **Pure mappers** (`fixed-asset.ts`) — `mapNsFixedAsset` translates a NetSuite `fixed_assets` row into the JSON shape this repo's `FixedAsset` + `FixedAssetBookAttributes` accept. Snake_case Fleet shape + human-readable variants ("Straight Line", "MACRS 5-year") both supported. Unmapped methods (150% DB, SYD, Amortization) → `NONE` with an explicit `unmappedMethodNote` for the caller to surface. 36 unit tests.
+  - **Idempotent importer** (`import.ts`) — `importNsFixedAssets` checks the lineage triple before create; per-asset errors captured (batch continues); nested write for `FixedAsset` + `bookAttributes` in one transaction. `resolveEntityCode` callback for multi-subsidiary imports. 11 integration tests against real Postgres.
+  - **Resume helper** (`resume-from-history.ts`) — `computeResumeFromHistory` backsolves `lastDepreciatedThrough` from NetSuite's reported `accumulated_depreciation` for `STRAIGHT_LINE` assets so the engine resumes from where NetSuite left off without double-counting. Non-linear methods return null with a reason. 16 unit tests covering happy path, edge cases (cross-year wrap, mid-year inServiceDate, sub-period accumulated, salvage ≥ cost), and method-specific bail-outs.
+  - **Resume wiring** — the importer auto-calls the resume helper after each create + persists `lastDepreciatedThrough` (opt out via `skipResumeFromHistory: true`).
+- Total in PR #14: **63 tests** (36 + 11 + 16) on top of the v0.1 suite — 121/121 pass, 0 regressions.
+
 ## What lands next (v0.2 ideas)
 
 - 🚧 **MACRS tables** — IRS Publication 946 percentages for 3 / 5 / 7 / 15-year half-year convention (US tax depreciation). Not math — lookup tables.
