@@ -3,101 +3,62 @@
 // Privacy TSC. Implements the contract described at
 // `docs/policies/data-subject-requests.md` → "Right of access".
 //
-// =========================================================================
-// SCHEMA GAP — DELEGATED ATTRIBUTION
-// =========================================================================
+// This function is INVOKED FROM ledger-core's `buildUserDataExport()`
+// when a subject's Article 15 request is being assembled. Fa-amort
+// is the canonical home for fixed-asset + depreciation data; this
+// helper returns **attribution counts only**, never the underlying
+// tenant data.
 //
-// Unlike `integrations` (which has `Connection.createdBy`) or `recon`
-// (which has `BankStatement.uploadedBy` + `ReconciliationMatch.approvedBy`
-// + `rejectedBy`), fa-amort's owned models do NOT carry user-attribution
-// columns:
+// Why counts and not contents:
+//   Fixed-asset registers + depreciation schedules are TENANT data.
+//   The subject's relationship is "who registered the asset" or "who
+//   ran the depreciation" — an attribution edge, not personal data.
+//   GDPR Art. 15 grants the subject access to personal data ABOUT
+//   THEM, not to the tenant's books.
 //
-//   - `FixedAsset` has no `createdBy`. Rows are created in ledger-core's
-//     NetSuite importer (no human user) or via future manual UI (not yet
-//     wired). When manual creation lands, the audit_log emission in
-//     ledger-core captures the actor.
-//   - `FixedAssetBookAttributes` has no `lastRunBy` or `disposedBy`.
-//     Depreciation runs flow through ledger-core's transactional
-//     `/api/internal/fixed-asset/record-depreciation` endpoint; the
-//     authoritative attribution for "who ran this" lives in
-//     ledger-core's audit_log (`event_type = "fixed_asset.depreciation_run"`
-//     + `user_id`).
-//   - `AiAssetSuggestion` has no `acceptedBy` / `rejectedBy`. The v0.1
-//     schema records the model's output but not the human decision
-//     (compare with `recon`'s `ReconciliationMatch.approvedBy`).
-//
-// =========================================================================
-// THE HONEST IMPLEMENTATION
-// =========================================================================
-//
-// This function returns **all zeros** with a snapshot timestamp. That
-// is the truthful state of fa-amort's owned attribution data today.
-// ledger-core's `buildUserDataExport()` is responsible for querying
-// `audit_log` for fa-amort-attributable events (the audit-log is
-// portfolio-wide; every fa-amort-initiated action that crosses the
-// internal-API boundary writes a row there with the userId from the
-// caller's session).
-//
-// This is preferable to returning fabricated counts or throwing
-// `NotImplementedError`:
-//   - A regulator reading the DSR export gets the actual data state.
-//   - The downstream caller (ledger-core) sees a 200 with zeros and
-//     proceeds to assemble the audit-log section.
-//   - When the schema gap is closed (via a future PR adding the
-//     missing columns), this function gets re-implemented and the
-//     interface stays stable.
-//
-// =========================================================================
-// WHEN TO CLOSE THE SCHEMA GAP
-// =========================================================================
-//
-// Trigger: when fa-amort grows its OWN data the audit-log can't
-// capture — e.g. an AI capex-classification "accepted"/"rejected"
-// decision column on `AiAssetSuggestion`. Until then, audit-log
-// delegation is correct.
+// Why this is a typed stub today:
+//   The actual implementation is gated on the first real DSR arriving.
+//   Until then the wiring point is reserved + the contract is
+//   documented in the type. The DSR procedure in
+//   `docs/policies/data-subject-requests.md` is the auditor-facing
+//   commitment; this file is the code-side commitment.
 
 import type { PrismaClient } from "@prisma/client";
 
 /**
  * Attribution counts for a user across fa-amort's tables.
  *
- * Stable schema — ledger-core's export bundle persists these counts
- * verbatim. All fields are zero today (see SCHEMA GAP note at top
- * of file). Once the AiAssetSuggestion decision column lands and
- * a manual-asset-creation Server Action is wired with `createdBy`,
- * the counts will surface real numbers.
+ * Stable schema — once shipped, ledger-core's export bundle will
+ * persist these counts.
  */
 export interface FaAmortAttribution {
   /**
-   * Fixed assets the subject registered. Always 0 today: FixedAsset
-   * has no `createdBy` column in v0.1. NetSuite-imported assets
-   * have no human user; manual creation isn't wired yet.
+   * Fixed assets the subject (as ADMIN+) registered. Counts the
+   * `FixedAsset` rows whose attribution chain ends at this userId.
+   * Does NOT include asset descriptions (encrypted at rest, preserved
+   * on erasure under legal-retention exemption).
    */
   fixedAssetsRegistered: number;
   /**
-   * Depreciation runs the subject initiated. Always 0 here:
-   * authoritative attribution lives in ledger-core's audit_log
-   * under `event_type = "fixed_asset.depreciation_run"`.
+   * Depreciation runs the subject initiated. Counts the
+   * `FixedAssetBookAttributes` row updates attributable to the user.
    */
   depreciationRunsInitiated: number;
   /**
-   * AI asset suggestions the subject accepted. Always 0 today:
-   * AiAssetSuggestion v0.1 records the model output but not the
-   * human decision. Closes when an `acceptedBy` column is added.
+   * AI asset suggestions the subject accepted or rejected. Counts
+   * `AiAssetSuggestion` rows attributable to the user. The
+   * suggestion bodies are encrypted at rest + preserved on erasure
+   * under the 7-year AI-audit-trail retention window.
    */
   aiAssetSuggestionsAccepted: number;
-  /**
-   * AI asset suggestions the subject rejected. Always 0 today.
-   * Same schema-gap story as `aiAssetSuggestionsAccepted`.
-   */
   aiAssetSuggestionsRejected: number;
   /**
-   * Asset disposals the subject authorized. Always 0 here:
-   * authoritative attribution lives in ledger-core's audit_log
-   * under `event_type = "fixed_asset.disposed"`.
+   * Asset disposals the subject authorized. Counts disposal events
+   * attributable to the user (depreciation catch-up + dispose paired
+   * JE through ledger-core's internal API).
    */
   assetDisposalsAuthorized: number;
-  /** When the count snapshot was taken (ISO 8601 UTC). */
+  /** When the count snapshot was taken. */
   snapshotAt: string;
 }
 
@@ -105,49 +66,33 @@ export interface FaAmortAttribution {
  * Assemble fa-amort's attribution contribution to the portfolio-wide
  * DSR export bundle.
  *
- * Today: returns all zeros (see SCHEMA GAP note at top of file).
- * The function signature + interface are stable so when the schema
- * gap closes, the wire-up site in ledger-core doesn't change.
- *
  * Caller: `ledger-core/src/lib/privacy/user-data.ts buildUserDataExport()`.
- * The caller is responsible for also querying audit_log for
- * fa-amort-attributable events; this helper is the data-assembly
- * seam for fa-amort's OWN tables only.
+ * Called via HTTP at a future `/api/internal/dsr/attribution` endpoint.
  *
  * Authorization: enforced at the calling Server Action layer in
  * ledger-core. This helper is the data-assembly seam, not the
  * authorization gate.
  *
- * @param prisma - Prisma client (typically the fa-amort singleton)
- * @param userId - Subject user UUID. Currently unused (schema gap);
- *                 reserved for the future implementation.
- * @returns All-zero attribution counts + snapshot timestamp.
+ * @throws NotImplementedError — body not yet written. Triggered when
+ *         the first real DSR arrives.
  */
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 export async function faAmortAttribution(
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   prisma: PrismaClient,
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   userId: string
 ): Promise<FaAmortAttribution> {
-  // No async work today — the schema has no attribution columns. The
-  // function is still async-typed so the future implementation (which
-  // WILL await Prisma calls) doesn't break the signature.
-  return {
-    fixedAssetsRegistered: 0,
-    depreciationRunsInitiated: 0,
-    aiAssetSuggestionsAccepted: 0,
-    aiAssetSuggestionsRejected: 0,
-    assetDisposalsAuthorized: 0,
-    snapshotAt: new Date().toISOString(),
-  };
+  throw new NotImplementedError(
+    "faAmortAttribution is a typed stub. See " +
+      "docs/policies/data-subject-requests.md → \"Open items\" for " +
+      "the implementation trigger."
+  );
 }
 
 /**
- * Retained for backwards compatibility with the v0.1 typed-stub
- * tests + any caller that imported it during the stub era. Real
- * callers will not see this thrown — the implementation above no
- * longer throws.
+ * Distinct error class so a real-DSR caller can catch this specifically
+ * vs. an unexpected error (e.g., DB outage) and surface the right
+ * message to the privacy lead.
  */
 export class NotImplementedError extends Error {
   constructor(message: string) {

@@ -69,7 +69,7 @@ export async function runDepreciationAction(
   input: RunDepreciationInput
 ): Promise<RunDepreciationState> {
   try {
-    await requireCurrentUser();
+    const user = await requireCurrentUser();
     const tenant = await requireCurrentTenant();
 
     if (!input.assetId) return { ok: false, message: "assetId required" };
@@ -168,6 +168,29 @@ export async function runDepreciationAction(
         expenseAmount: p.expenseAmount,
       })),
     });
+
+    // Last-run attribution stamp (2026-06-05 — closes v2.1 deficiency
+    // #25). Runs AFTER the ledger-core call returns successfully; the
+    // core transactional contract (JE posts + accumulatedDepreciation
+    // + lastDepreciatedThrough) is owned by ledger-core's endpoint.
+    // If this stamp update fails, the attribution is lost but the
+    // core data is correct — acceptable tradeoff. The DSR helper
+    // reads these columns to count user-attributable runs.
+    if (posted.freshCount > 0) {
+      try {
+        await prisma.fixedAssetBookAttributes.update({
+          where: {
+            assetId_bookId: { assetId: input.assetId, bookId: input.bookId },
+          },
+          data: {
+            lastRunBy: user.id,
+            lastRunAt: new Date(),
+          },
+        });
+      } catch {
+        // Stamp failures don't affect the core success path.
+      }
+    }
 
     revalidatePath("/fixed-assets");
     revalidatePath(`/fixed-assets/${input.assetId}`);

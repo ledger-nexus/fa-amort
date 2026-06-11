@@ -177,6 +177,12 @@ model JournalEntry {
 
 model FixedAsset {
   id       String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  // SECURITY (pen-test pass 4): tenantId mirrors the ledger-core
+  // column so Server Actions can write rows through Prisma. The DB
+  // requires it NOT NULL; without the mirror, Prisma's INSERT
+  // omitted the column and the row got rejected with P2011. Same
+  // gap closed in revenue-rec PR #21 (RevenueContract.tenantId).
+  tenantId String      @db.Uuid
   entityId String      @db.Uuid
   entity   LegalEntity @relation(fields: [entityId], references: [id])
 
@@ -198,6 +204,15 @@ model FixedAsset {
   bookAttributes      FixedAssetBookAttributes[]
   aiSuggestions       AiAssetSuggestion[]
 
+  // Human-decision audit trail (added 2026-06-05 to close v2.1
+  // deficiency #25). `createdBy` is set by the Server Action that
+  // creates the FixedAsset row (manual UI flow); NetSuite imports
+  // leave it null (no human actor). `disposedBy` flips on disposal.
+  // DSR attribution (fa-attribution.ts) reads these columns to count
+  // user-attributable fixed-asset activity.
+  createdBy   String?  @db.Uuid
+  disposedBy  String?  @db.Uuid
+
   sourceSystem     String?
   sourceRecordType String?
   sourceRecordId   String?
@@ -209,7 +224,10 @@ model FixedAsset {
   updatedAt DateTime @updatedAt
 
   @@unique([entityId, code])
+  @@index([tenantId])
   @@index([entityId, status])
+  @@index([createdBy])
+  @@index([disposedBy])
   @@map("fixed_asset")
 }
 
@@ -235,8 +253,17 @@ model FixedAssetBookAttributes {
   depreciationExpenseAccountCode String
   accumDepreciationAccountCode   String
 
+  // Last-run audit trail (added 2026-06-05 to close v2.1 deficiency
+  // #25). Set by the Server Action that runs depreciation through a
+  // given throughDate. NetSuite-imported book-attrs rows (via the
+  // resume-from-history helper) leave both null — no human actor.
+  // DSR attribution counts: depreciation runs per user.
+  lastRunBy   String?   @db.Uuid
+  lastRunAt   DateTime?
+
   @@id([assetId, bookId])
   @@index([bookId, lastDepreciatedThrough])
+  @@index([lastRunBy])
   @@map("fixed_asset_book_attributes")
 }
 
@@ -283,10 +310,22 @@ model AiAssetSuggestion {
   completionTokens Int?
   latencyMs        Int?
 
+  // Human-decision audit trail (added 2026-06-05 to close v2.1
+  // deficiency #25). When a Server Action accepts or rejects an AI
+  // suggestion, it populates the matching pair atomically with the
+  // downstream effect. Both null on the initial model-output row.
+  // DSR attribution counts: AI suggestions accepted/rejected per user.
+  acceptedBy String?   @db.Uuid
+  acceptedAt DateTime?
+  rejectedBy String?   @db.Uuid
+  rejectedAt DateTime?
+
   createdAt DateTime @default(now())
 
   @@index([assetId])
   @@index([kind, createdAt])
+  @@index([acceptedBy])
+  @@index([rejectedBy])
   @@map("ai_asset_suggestion")
 }
 
