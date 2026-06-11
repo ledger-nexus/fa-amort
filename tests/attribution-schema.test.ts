@@ -14,6 +14,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PrismaClient } from "@prisma/client";
 
+const HAS_DB = !!process.env.DATABASE_URL;
+
 const prisma = new PrismaClient();
 const SUFFIX = "fadef" + Date.now().toString(36);
 
@@ -32,6 +34,7 @@ async function cleanup() {
 }
 
 beforeAll(async () => {
+  if (!HAS_DB) return;
   await cleanup();
 
   const entity = await prisma.legalEntity.findFirst({
@@ -55,11 +58,12 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (!HAS_DB) return;
   await cleanup();
   await prisma.$disconnect();
 });
 
-describe("fa-amort attribution schema (2026-06-05)", () => {
+describe.skipIf(!HAS_DB)("fa-amort attribution schema (2026-06-05)", () => {
   it("FixedAsset.createdBy + disposedBy columns exist + accept null + accept uuid values", async () => {
     const asset = await prisma.fixedAsset.create({
       data: {
