@@ -43,6 +43,19 @@ The architecture canon is [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Read i
 
 8. **Mirror discipline.** Enum-typed columns in ledger-core MUST stay enums here (Prisma's `db push` errors otherwise). recon and revenue-rec learned this the hard way; this schema was built right the first time. If you add a new ledger-core enum, mirror it here and run `prisma migrate diff --from-url … --to-schema-datamodel … --script` to extract only the additive SQL for owned tables.
 
+9. **All error emission goes through the monitoring shim.** `src/lib/monitoring/index.ts` is the canonical path — `captureError(err, context)` / `captureMessage(msg, level, context)`. Every emit runs `redactPii()` before the error reaches Sentry or the console fallback. **Never call Sentry directly + never console.error a Prisma/Plaid error's `.message`** — the column-value embedding pattern is real and a leak class auditors flag. The shim's `sanitizeErrorForCapture()` also strips the V8 stack preamble so `.message` PII can't leak via `.stack` (14th adversarial pass closure 2026-06-05). Add new field names to `src/lib/soc2/redact-pii.ts` allowlist when new sensitive columns ship — over-redaction is acceptable; under-redaction is a SOC 2 finding.
+
+## SOC 2 + adversarial-pass cadence
+
+This repo is part of the ledger-nexus portfolio's SOC 2 Type 2 readiness program. Current state (per `ledger-core/docs/SOC2_READINESS.md`): **≈80% to Type 1 audit-ready**.
+
+**Adversarial-pass discipline:** every substantive code shipment in this repo (Server Actions, schema additions, monitoring code, anything cross-tenant-touching) should be followed by an adversarial-pass audit before merge. The portfolio has run **14 adversarial passes** to date; the most recent two (13th + 14th) both found real HIGHs in newly-shipped code:
+
+- **13th pass (2026-06-05 morning):** found silent `catch {}` in `run-depreciation.ts` (CC7.3 violation) — closed via fa-amort PR #20
+- **14th pass (2026-06-05 night):** found Error.stack PII leak via V8 preamble despite redactPii — closed via fa-amort PR #21 2nd commit
+
+The cadence is the evidence: SOC 2 CC4 (Monitoring Activities) auditors grade "this team finds + closes their own weaknesses." A self-discovered HIGH closed in-session with tests pinning the attack scenario is the highest-confidence CC4 evidence form. **When you ship something load-bearing, run an adversarial pass before declaring done.**
+
 ## What's wired (v0.1)
 
 - **Scheduler** ([`src/lib/accounting/depreciation.ts`](src/lib/accounting/depreciation.ts)) — `runDepreciation({asset, throughDate})` and `projectFullSchedule(spec)`. Pure functions, decimal.js-based, 22 unit tests.
