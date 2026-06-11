@@ -22,6 +22,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PrismaClient } from "@prisma/client";
 import { faAmortAttribution } from "../src/lib/privacy/fa-attribution";
 
+const HAS_DB = !!process.env.DATABASE_URL;
+
 const prisma = new PrismaClient();
 const SUFFIX = "faw" + Date.now().toString(36);
 
@@ -39,6 +41,7 @@ async function cleanup() {
 }
 
 beforeAll(async () => {
+  if (!HAS_DB) return;
   await cleanup();
 
   const entity = await prisma.legalEntity.findFirst({
@@ -195,11 +198,12 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (!HAS_DB) return;
   await cleanup();
   await prisma.$disconnect();
 });
 
-describe("fa-attribution helper — wired against real columns", () => {
+describe.skipIf(!HAS_DB)("fa-attribution helper — wired against real columns", () => {
   it("returns correct attribution counts for SUBJECT", async () => {
     const result = await faAmortAttribution(prisma, SUBJECT_USER_ID);
 
