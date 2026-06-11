@@ -173,9 +173,28 @@ export async function runDepreciationAction(
     // #25). Runs AFTER the ledger-core call returns successfully; the
     // core transactional contract (JE posts + accumulatedDepreciation
     // + lastDepreciatedThrough) is owned by ledger-core's endpoint.
-    // If this stamp update fails, the attribution is lost but the
+    // If this stamp update fails the attribution is lost but the
     // core data is correct — acceptable tradeoff. The DSR helper
     // reads these columns to count user-attributable runs.
+    //
+    // RACE: concurrent calls for the same (asset, book) — second
+    // stamp wins, first user's stamp is overwritten. Most-recent-
+    // run semantics. The audit_log emission in ledger-core retains
+    // both actors so attribution is recoverable from there.
+    //
+    // GATE on `posted.freshCount > 0` — when ledger-core dedups all
+    // periods (idempotent re-post), no new attribution event occurs
+    // and the stamp stays at its prior value. Audit_log still records
+    // the API call.
+    //
+    // 13th-pass H1: silent `catch {}` is the SOC 2 CC7.3 violation —
+    // a permanent stamp failure (schema drift, encryption-extension
+    // throw, row-deleted-concurrently) would never surface. Stamp
+    // errors now emit to console (captured by Vercel function logs;
+    // Sentry wiring deferred to fa-amort's monitoring shim). PII-safe:
+    // we log the asset/book/user IDs only (UUIDs are not PII per our
+    // data-classification policy), never the error's `.message`
+    // verbatim because Prisma error messages can echo column values.
     if (posted.freshCount > 0) {
       try {
         await prisma.fixedAssetBookAttributes.update({
@@ -187,8 +206,19 @@ export async function runDepreciationAction(
             lastRunAt: new Date(),
           },
         });
-      } catch {
-        // Stamp failures don't affect the core success path.
+      } catch (e) {
+        // Stamp failures don't affect the core success path. But they
+        // DO need to surface — otherwise the DSR attribution count
+        // silently diverges from ledger-core's audit_log forever.
+        const errCode =
+          e instanceof Error
+            ? (e as { code?: string }).code ?? e.name
+            : "unknown";
+        console.error(
+          `[fa-amort/run-depreciation] attribution-stamp failed (non-fatal): ` +
+            `assetId=${input.assetId} bookId=${input.bookId} userId=${user.id} ` +
+            `errCode=${errCode}`
+        );
       }
     }
 

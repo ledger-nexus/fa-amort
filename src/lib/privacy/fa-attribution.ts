@@ -66,23 +66,61 @@ export interface FaAmortAttribution {
  * COUNT(*) queries, each with a btree-indexed equality predicate.
  * Sub-100ms even on warm production data.
  *
+ * # Tenant-scope semantics (13th-pass M1 — intentional behavior)
+ *
+ * The five count queries filter by `userId` ONLY, with no `tenantId`
+ * predicate. This is intentional for DSR semantics: GDPR Art. 15 + CPRA
+ * "right of access" treat the data subject as a single global identity.
+ * A user who acted across multiple tenants (consultant, support agent,
+ * multi-tenant operator) is entitled to the union of all their activity,
+ * not a per-tenant slice. ledger-core's `buildUserDataExport` does the
+ * same — bundle-level isolation is by `User.id`, not by `(User.id,
+ * Tenant.id)`.
+ *
+ * If a future caller needs a tenant-scoped variant (e.g., compliance
+ * report scoped to one customer's data), add an overload with an
+ * optional `tenantId?: string` parameter that joins through `FixedAsset
+ * .entity.tenantId`. Do NOT make the unscoped variant tenant-aware —
+ * the DSR contract would break.
+ *
+ * # Authorization
+ *
+ * Enforced at the calling Server Action layer in ledger-core. This
+ * helper is the data-assembly seam, not the authorization gate.
+ *
+ * # Input validation (13th-pass M2)
+ *
+ * `userId` MUST be a non-empty string. A null/undefined/empty caller
+ * would silently match every NULL-attribution row in the database
+ * (every NetSuite-imported asset, every pre-migration row) and return
+ * misleading counts to the DSR export. The guard is one line at the
+ * top; not optional.
+ *
  * Caller: `ledger-core/src/lib/privacy/user-data.ts buildUserDataExport()`.
  * The caller is responsible for ALSO querying audit_log for fa-amort-
  * attributable events; this helper is the data-assembly seam for
  * fa-amort's OWN tables only.
  *
- * Authorization: enforced at the calling Server Action layer in
- * ledger-core. This helper is the data-assembly seam, not the
- * authorization gate.
- *
  * @param prisma - Prisma client (typically the fa-amort singleton).
- * @param userId - Subject user UUID.
+ * @param userId - Subject user UUID. Required — must be non-empty.
  * @returns Attribution counts + snapshot timestamp.
+ * @throws Error if userId is empty/null/undefined.
  */
 export async function faAmortAttribution(
   prisma: PrismaClient,
   userId: string
 ): Promise<FaAmortAttribution> {
+  // 13th-pass M2: defense against null/undefined/empty userId reaching
+  // the count queries — without this guard, Prisma serializes
+  // `where: { createdBy: null }` which matches every NetSuite-imported
+  // row (no human actor). The DSR export then returns "you registered
+  // 4,217 fixed assets" when the answer is "0 — you did nothing here."
+  if (typeof userId !== "string" || userId.length === 0) {
+    throw new Error(
+      "faAmortAttribution: userId is required and must be a non-empty string"
+    );
+  }
+
   const [
     fixedAssetsRegistered,
     assetDisposalsAuthorized,
