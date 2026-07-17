@@ -246,14 +246,14 @@ async function createFixedAssetIfMissing(
     }
   }
 
-  // Use relation-style connect for entity + acquisitionCurrency because
-  // `bookAttributes: { create: [...] }` (nested write) requires the
-  // checked CreateInput variant. tenantId is a plain scalar in the
-  // mirror (no Tenant relation is defined on FixedAsset), so it is set
-  // directly — Prisma allows non-relation scalars in the checked input.
+  // Use relation-style connect for tenant + entity + acquisitionCurrency
+  // because `bookAttributes: { create: [...] }` (nested write) requires the
+  // checked CreateInput variant. The 2026-07 mirror re-sync added the
+  // Tenant relation to FixedAsset (FK-closed mirror), so tenantId is now
+  // connected like the other relations.
   await prisma.fixedAsset.create({
     data: {
-      tenantId,
+      tenant: { connect: { id: tenantId } },
       entity: { connect: { id: entity.id } },
       code: mapped.code,
       description: mapped.description,

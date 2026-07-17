@@ -54,7 +54,13 @@ cp .env.example .env
 # Set DATABASE_URL (same as ledger-core)
 # Set LEDGER_CORE_URL=http://localhost:3000 and INTERNAL_API_TOKEN (match ledger-core's)
 
-pnpm db:push      # creates ai_asset_suggestion (only owned table)
+# Schema: the shared dev DB already has every table. If ai_asset_suggestion
+# is missing (fresh DB), run `pnpm db:diff`, review the script, keep ONLY the
+# ai_asset_suggestion / AiAssetSuggestionKind statements, and apply them with
+# `npx prisma db execute --file <reviewed.sql>`. NEVER `prisma db push` here —
+# this schema declares a subset of the shared DB, and a blind push emits
+# destructive DDL against ledger-core-owned tables (see docs/ARCHITECTURE.md
+# "Schema-safety protocol").
 pnpm dev          # http://localhost:3004 — different port than ledger-core (3000), recon (3001), revenue-rec (3002), integrations (3003)
 pnpm test         # 22 unit tests; depreciation math only, no DB needed
 ```

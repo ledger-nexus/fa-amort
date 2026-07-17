@@ -10,7 +10,36 @@ Fixed-asset accounting is two distinct things bolted together: a static record o
 
 Same rationale as recon, revenue-rec, and integrations. ledger-core is the substrate; it owns the universal models (entities, books, accounts, JEs, fixed assets, parties, currencies, periods, posting rules, ownership). The substrate is small, dense, and changes rarely. Workflow engines — bank reconciliation, revenue recognition, integrations, fixed-asset depreciation — are larger, more opinionated, and change frequently. Splitting them out keeps the substrate stable while letting each workflow engine ship on its own cadence and stay easy to reason about. It also lets a deployment turn off fa-amort entirely (a service business with no capex doesn't need it) without touching ledger-core.
 
-Cost of this choice: every companion repo mirrors a slice of ledger-core's schema (read-mostly) and writes downstream via HTTP bridges. That's the price of repo-level modularity in a shared-DB Prisma world. Each repo is responsible for keeping its mirror enums and column types in sync with the upstream — drift is caught at `prisma db push` time.
+Cost of this choice: every companion repo mirrors a slice of ledger-core's schema (read-mostly) and writes downstream via HTTP bridges. That's the price of repo-level modularity in a shared-DB Prisma world. Each repo is responsible for keeping its mirror in sync with the upstream — the mirror is GENERATED from ledger-core's schema, never hand-drifted, and drift is caught by the schema-safety protocol below (NOT by `db push`, which is banned).
+
+## Schema-safety protocol
+
+`prisma/schema.prisma` declares only a subset of the shared database, so any
+tool that makes the DB match the schema wholesale (`prisma db push`,
+`migrate dev`) would execute the full diff — including DROP/ALTER statements
+against every shared table this repo doesn't declare, or declares
+incorrectly. On a stale mirror that means destructive DDL against
+ledger-core-owned tables. Therefore (same protocol as xbrl-filer and recon):
+
+- `db push` is banned in this repo (no npm script exists for it).
+- Schema changes to fa-amort-owned tables apply via `npm run db:diff` →
+  review the script and keep ONLY statements touching fa-amort-owned tables
+  (`ai_asset_suggestion`) and enums (`AiAssetSuggestionKind`) →
+  `npx prisma db execute --file <reviewed.sql>`. Everything else in the diff
+  is subset-of-shared-DB noise (drops of other repos' objects) and MUST NOT
+  run.
+- The mirror is re-generated from ledger-core's schema (currently main
+  commit 9442667, 2026-07-16) and is FK-CLOSED: every foreign key on a
+  mirrored table points at another mirrored table. Invariant: `npm run
+  db:diff` emits ZERO statements against mirrored or owned tables. A
+  statement against a mirrored table means the mirror has drifted —
+  re-generate it before doing anything else.
+- Known exception, by design: four audit columns on ledger-core-owned
+  tables (`FixedAsset.createdBy/.disposedBy`,
+  `FixedAssetBookAttributes.lastRunBy/.lastRunAt`) were added by fa-amort
+  via reviewed raw SQL (`prisma/sql/2026-06-05-attribution-schema.sql`) and
+  are declared in the mirror so the diff stays at zero. They are pending
+  upstreaming into ledger-core's schema; do not add more.
 
 ## The cross-repo write story
 

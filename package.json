@@ -8,7 +8,7 @@
     "build": "next build",
     "start": "next start -p 3004",
     "lint": "next lint",
-    "db:push": "prisma db push",
+    "db:diff": "prisma migrate diff --from-url \"$DATABASE_URL\" --to-schema-datamodel prisma/schema.prisma --script",
     "db:studio": "prisma studio",
     "test": "vitest run",
     "test:watch": "vitest"
