@@ -2,22 +2,49 @@
 //
 // Two halves, same pattern as recon / revenue-rec / integrations:
 //
-//   1. ledger-core mirror — LegalEntity, Book, Account, JournalEntry,
-//      JournalLine, Party, Currency, FixedAsset, FixedAssetBookAttributes.
-//      Column-for-column with ledger-core's schema. fa-amort does NOT
-//      migrate these tables; ledger-core owns them. Read-mostly here;
-//      depreciation runs UPDATE FixedAssetBookAttributes.accumulatedDepreciation
-//      and .lastDepreciatedThrough as a cross-repo write (v0.1; v0.2 will
-//      refactor to an HTTP boundary endpoint on ledger-core).
+//   1. ledger-core models fa-amort QUERIES (Tenant, TenantMembership, User,
+//      LegalEntity, Book, FiscalCalendar, Period, Currency, Party, Account,
+//      JournalEntry, FixedAsset, FixedAssetBookAttributes). These mirror the
+//      canonical definitions in ledger-core's schema — column-for-column,
+//      relations trimmed to the mirrored set. fa-amort does NOT migrate
+//      these tables; ledger-core owns them. This mirror was GENERATED from
+//      ledger-core's schema at main commit 9442667 (2026-07-16) —
+//      re-generate on upstream schema change, never hand-drift.
 //
-//   2. fa-amort-OWNED — AiAssetSuggestion (audit trail for v0.2's AI
-//      classification + useful-life suggestions). v0.1 has zero rows here
-//      since AI doesn't fire yet; table exists so v0.2 doesn't need a
-//      schema migration.
+//      The mirror is FK-CLOSED: every foreign key on a mirrored table points
+//      at another mirrored table, so `npm run db:diff` produces ZERO
+//      statements against ledger-core-owned tables. If the diff ever shows a
+//      statement against one of them, the mirror has drifted — re-generate it
+//      from ledger-core before doing anything else.
 //
-// Mirror discipline: enum-typed columns in ledger-core MUST stay enums
-// here (Prisma's db push errors otherwise). recon and revenue-rec already
-// learned this the hard way; this schema is built right the first time.
+//      EXCEPTION, documented: fa-amort added four audit columns to two
+//      ledger-core-owned tables via reviewed raw SQL
+//      (prisma/sql/2026-06-05-attribution-schema.sql): FixedAsset.createdBy
+//      / .disposedBy and FixedAssetBookAttributes.lastRunBy / .lastRunAt,
+//      plus their indexes. They are declared here (so the diff stays at
+//      zero) but do NOT exist in ledger-core's schema yet — they are
+//      pending upstreaming. Do not add more columns to ledger-core tables
+//      from this repo; upstream them instead.
+//
+//   2. fa-amort models fa-amort OWNS (AiAssetSuggestion). Schema changes to
+//      the shared DB are applied via a REVIEWED `prisma migrate diff`
+//      script — NEVER `prisma db push` or `migrate dev`. Because this schema
+//      declares only a subset of the shared database, a blind push would
+//      execute the full diff, including DROP/ALTER statements against every
+//      shared table this file doesn't declare (or declares incorrectly).
+//      Protocol:
+//
+//        1. npm run db:diff                    # migrate diff → SQL script
+//        2. Review: keep ONLY statements touching fa-amort-owned tables
+//           (ai_asset_suggestion) and fa-amort-owned enums
+//           (AiAssetSuggestionKind). Everything else is subset-of-shared-DB
+//           noise and MUST NOT run.
+//        3. npx prisma db execute --file <reviewed.sql>
+//
+// The repos share one Postgres database — fa-amort connects with the same
+// DATABASE_URL as ledger-core. Per the universal-schema spec: "Postgres
+// schema dependency is cleaner than npm-package dependency for this
+// domain."
 
 generator client {
   provider = "prisma-client-js"
@@ -29,315 +56,14 @@ datasource db {
 }
 
 // =========================================================================
-// ledger-core mirror — DO NOT EDIT without syncing upstream
+// ledger-core mirror — DO NOT EDIT without re-syncing from ledger-core
 // =========================================================================
 
-model LegalEntity {
-  id                   String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  // SECURITY (pen-test pass 4): tenantId added so Server Actions can
-  // tenant-scope record lookups.
-  tenantId             String  @db.Uuid
-  code                 String
-  name                 String
-  parentEntityId       String? @db.Uuid
-  functionalCurrencyId String
-  sourceSystem         String?
-  sourceRecordType     String?
-  sourceRecordId       String?
-  sourcePayload        Json?
-  mappingVersion       String?
-  extensions           Json?
-
-  journalEntries JournalEntry[]
-  fixedAssets    FixedAsset[]
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  @@map("legal_entity")
+enum TenantRole {
+  OWNER // cannot be removed; can delete the tenant
+  ADMIN // full read+write+admin (period close, user lifecycle)
+  MEMBER // read+write, no admin actions
 }
-
-model Book {
-  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  code                String    @unique
-  name                String
-  basis               BookBasis
-  reportingCurrencyId String
-  isActive            Boolean   @default(true)
-  extensions          Json?
-
-  journalEntries           JournalEntry[]
-  fixedAssetBookAttributes FixedAssetBookAttributes[]
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  @@map("book")
-}
-
-model Account {
-  id               String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  entityId         String?       @db.Uuid
-  code             String
-  name             String
-  type             AccountType
-  normalBalance    NormalBalance
-  subtype          String?
-  isContra         Boolean       @default(false)
-  isControlAccount Boolean       @default(false)
-  isBank           Boolean       @default(false)
-  parentAccountId  String?       @db.Uuid
-  bookScope        String[]      @default([])
-  active           Boolean       @default(true)
-
-  sourceSystem     String?
-  sourceRecordType String?
-  sourceRecordId   String?
-  sourcePayload    Json?
-  mappingVersion   String?
-  extensions       Json?
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  @@unique([entityId, code])
-  @@map("account")
-}
-
-model Party {
-  id            String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  entityId      String? @db.Uuid
-  code          String
-  displayName   String
-  parentPartyId String? @db.Uuid
-
-  fixedAssetVendors FixedAsset[] @relation("FixedAssetVendor")
-
-  sourceSystem     String?
-  sourceRecordType String?
-  sourceRecordId   String?
-  sourcePayload    Json?
-  mappingVersion   String?
-  extensions       Json?
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  @@unique([entityId, code])
-  @@map("party")
-}
-
-model Currency {
-  code     String  @id
-  name     String
-  decimals Int     @default(2)
-  symbol   String?
-
-  fixedAssetAcquisitions FixedAsset[] @relation("FixedAssetAcqCcy")
-
-  @@map("currency")
-}
-
-model JournalEntry {
-  id           String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  // Phase 4b: entryNumber unique per [tenantId, entryNumber] in ledger-core.
-  // No tenantId in this mirror; drop @unique, callers use findFirst.
-  entryNumber  String
-  entityId     String        @db.Uuid
-  entity       LegalEntity   @relation(fields: [entityId], references: [id])
-  bookId       String        @db.Uuid
-  book         Book          @relation(fields: [bookId], references: [id])
-  periodId     String?       @db.Uuid
-  documentDate DateTime      @db.Date
-  postingDate  DateTime      @db.Date
-  memo         String
-  currencyId   String
-  fxRate       Decimal       @default(1) @db.Decimal(20, 10)
-  source       JournalSource @default(MANUAL)
-  status       EntryStatus   @default(POSTED)
-  reversalOfId String?       @db.Uuid
-
-  sourceSystem     String?
-  sourceRecordType String?
-  sourceRecordId   String?
-  sourcePayload    Json?
-  mappingVersion   String?
-  extensions       Json?
-
-  createdAt DateTime @default(now())
-  createdBy String?
-
-  @@index([entityId, bookId, documentDate])
-  @@map("gl_entry_header")
-}
-
-// =========================================================================
-// Fixed assets (the substrate models fa-amort reads + drives)
-// =========================================================================
-
-model FixedAsset {
-  id       String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  // SECURITY (pen-test pass 4): tenantId mirrors the ledger-core
-  // column so Server Actions can write rows through Prisma. The DB
-  // requires it NOT NULL; without the mirror, Prisma's INSERT
-  // omitted the column and the row got rejected with P2011. Same
-  // gap closed in revenue-rec PR #21 (RevenueContract.tenantId).
-  tenantId String      @db.Uuid
-  entityId String      @db.Uuid
-  entity   LegalEntity @relation(fields: [entityId], references: [id])
-
-  code                  String
-  description           String
-  category              String?
-  vendorPartyId         String?          @db.Uuid
-  vendor                Party?           @relation("FixedAssetVendor", fields: [vendorPartyId], references: [id])
-  acquisitionDate       DateTime         @db.Date
-  acquisitionCost       Decimal          @db.Decimal(18, 4)
-  acquisitionCurrencyId String
-  acquisitionCurrency   Currency         @relation("FixedAssetAcqCcy", fields: [acquisitionCurrencyId], references: [code])
-  status                FixedAssetStatus @default(IN_SERVICE)
-  disposalDate          DateTime?        @db.Date
-  disposalProceeds      Decimal?         @db.Decimal(18, 4)
-
-  assetAccountCode String
-
-  bookAttributes      FixedAssetBookAttributes[]
-  aiSuggestions       AiAssetSuggestion[]
-
-  // Human-decision audit trail (added 2026-06-05 to close v2.1
-  // deficiency #25). `createdBy` is set by the Server Action that
-  // creates the FixedAsset row (manual UI flow); NetSuite imports
-  // leave it null (no human actor). `disposedBy` flips on disposal.
-  // DSR attribution (fa-attribution.ts) reads these columns to count
-  // user-attributable fixed-asset activity.
-  createdBy   String?  @db.Uuid
-  disposedBy  String?  @db.Uuid
-
-  sourceSystem     String?
-  sourceRecordType String?
-  sourceRecordId   String?
-  sourcePayload    Json?
-  mappingVersion   String?
-  extensions       Json?
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  @@unique([entityId, code])
-  @@index([tenantId])
-  @@index([entityId, status])
-  @@index([createdBy])
-  @@index([disposedBy])
-  @@map("fixed_asset")
-}
-
-enum FixedAssetStatus {
-  IN_SERVICE
-  IDLE
-  DISPOSED
-  HELD_FOR_SALE
-}
-
-model FixedAssetBookAttributes {
-  assetId                 String             @db.Uuid
-  asset                   FixedAsset         @relation(fields: [assetId], references: [id], onDelete: Cascade)
-  bookId                  String             @db.Uuid
-  book                    Book               @relation(fields: [bookId], references: [id])
-  usefulLifeMonths        Int
-  depreciationMethod      DepreciationMethod
-  inServiceDate           DateTime           @db.Date
-  salvageValue            Decimal            @default(0) @db.Decimal(18, 4)
-  accumulatedDepreciation Decimal            @default(0) @db.Decimal(18, 4)
-  lastDepreciatedThrough  DateTime?          @db.Date
-
-  depreciationExpenseAccountCode String
-  accumDepreciationAccountCode   String
-
-  // Last-run audit trail (added 2026-06-05 to close v2.1 deficiency
-  // #25). Set by the Server Action that runs depreciation through a
-  // given throughDate. NetSuite-imported book-attrs rows (via the
-  // resume-from-history helper) leave both null — no human actor.
-  // DSR attribution counts: depreciation runs per user.
-  lastRunBy   String?   @db.Uuid
-  lastRunAt   DateTime?
-
-  @@id([assetId, bookId])
-  @@index([bookId, lastDepreciatedThrough])
-  @@index([lastRunBy])
-  @@map("fixed_asset_book_attributes")
-}
-
-enum DepreciationMethod {
-  STRAIGHT_LINE
-  DOUBLE_DECLINING
-  MACRS_3_HY
-  MACRS_5_HY
-  MACRS_7_HY
-  MACRS_15_HY
-  UNITS_OF_PRODUCTION
-  NONE
-}
-
-// =========================================================================
-// fa-amort-OWNED models
-// =========================================================================
-
-// Audit trail for AI-assisted asset workflows (v0.2). Every Claude call
-// is logged here whether the human accepts or rejects the suggestion —
-// same discipline as recon's AiSuggestion and revenue-rec's
-// AiExtractionSuggestion. Pre-creating the table now so v0.2 doesn't
-// need a separate schema migration.
-//
-// kind discriminates between the suggestion types: CAPEX_CLASSIFICATION
-// (is this purchase capitalizable?), USEFUL_LIFE (how many months?),
-// IMPAIRMENT_INDICATOR (does this text suggest impairment?).
-model AiAssetSuggestion {
-  id           String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  /// Nullable because CAPEX_CLASSIFICATION runs BEFORE the asset exists.
-  assetId      String?                @db.Uuid
-  asset        FixedAsset?            @relation(fields: [assetId], references: [id], onDelete: Cascade)
-
-  kind         AiAssetSuggestionKind
-  /// Free-form input the model evaluated: a purchase description, invoice
-  /// text, news article excerpt, etc.
-  inputText    String
-  /// The model's structured response. Shape depends on kind.
-  outputJson   Json
-
-  modelName        String
-  promptHash       String?
-  promptTokens     Int?
-  completionTokens Int?
-  latencyMs        Int?
-
-  // Human-decision audit trail (added 2026-06-05 to close v2.1
-  // deficiency #25). When a Server Action accepts or rejects an AI
-  // suggestion, it populates the matching pair atomically with the
-  // downstream effect. Both null on the initial model-output row.
-  // DSR attribution counts: AI suggestions accepted/rejected per user.
-  acceptedBy String?   @db.Uuid
-  acceptedAt DateTime?
-  rejectedBy String?   @db.Uuid
-  rejectedAt DateTime?
-
-  createdAt DateTime @default(now())
-
-  @@index([assetId])
-  @@index([kind, createdAt])
-  @@index([acceptedBy])
-  @@index([rejectedBy])
-  @@map("ai_asset_suggestion")
-}
-
-enum AiAssetSuggestionKind {
-  CAPEX_CLASSIFICATION
-  USEFUL_LIFE
-  IMPAIRMENT_INDICATOR
-}
-
-// =========================================================================
-// Enums mirrored from ledger-core. MUST stay in sync.
-// =========================================================================
 
 enum BookBasis {
   US_GAAP
@@ -345,6 +71,15 @@ enum BookBasis {
   IFRS
   MGMT
   STATUTORY
+}
+
+enum PeriodFrequency {
+  MONTHLY
+  QUARTERLY
+  WEEKLY_4_4_5
+  WEEKLY_4_5_4
+  WEEKLY_5_4_4
+  CUSTOM
 }
 
 enum AccountType {
@@ -360,12 +95,19 @@ enum NormalBalance {
   CREDIT
 }
 
+enum TranslationCategory {
+  CURRENT_RATE
+  HISTORICAL
+  WEIGHTED_AVG
+  EXCLUDED
+}
+
 enum JournalSource {
-  MANUAL
-  SEED
-  SYSTEM
-  AI_APPROVED
-  IMPORT
+  MANUAL // entered by a human via the UI
+  SEED // loaded from seed data
+  SYSTEM // posted by another module (e.g. rev rec engine)
+  AI_APPROVED // AI suggested, human approved (used in recon project)
+  IMPORT // ERP import (companion to source_system lineage)
 }
 
 enum EntryStatus {
@@ -375,28 +117,530 @@ enum EntryStatus {
   REVERSED
 }
 
-// Shared multi-tenancy mirror (pen-test pass 4).
-model User {
-  id          String  @id @db.Uuid
-  email       String  @unique
-  displayName String
-  isActive    Boolean @default(true)
-  memberships TenantMembership[]
-  @@map("app_user")
+enum OwnerType {
+  USER
+  QUEUE
 }
+
+enum FixedAssetStatus {
+  IN_SERVICE
+  IDLE
+  DISPOSED
+  HELD_FOR_SALE
+}
+
+enum DepreciationMethod {
+  STRAIGHT_LINE
+  DOUBLE_DECLINING
+  MACRS_3_HY
+  MACRS_5_HY
+  MACRS_7_HY
+  MACRS_15_HY
+  UNITS_OF_PRODUCTION
+  NONE // for non-depreciable assets (land)
+}
+
 model Tenant {
-  id          String  @id @db.Uuid
-  slug        String  @unique
+  id          String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  slug        String @unique // url-safe, e.g. "acme-co"
   name        String
+  ownerUserId String @db.Uuid
+
   memberships TenantMembership[]
+
+  // Backrefs from tenant-scoped domain models (mirrored subset only).
+  legalEntities   LegalEntity[]
+  fiscalCalendars FiscalCalendar[]
+  periods         Period[]
+  parties         Party[]
+  accounts        Account[]
+  journalEntries  JournalEntry[]
+  fixedAssets     FixedAsset[]
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime? // soft delete
+
+  @@index([ownerUserId])
   @@map("tenant")
 }
+
 model TenantMembership {
-  tenantId String @db.Uuid
-  userId   String @db.Uuid
-  role     String
-  tenant Tenant @relation(fields: [tenantId], references: [id])
-  user   User   @relation(fields: [userId], references: [id])
+  id       String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId String     @db.Uuid
+  userId   String     @db.Uuid
+  role     TenantRole @default(MEMBER)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
   @@unique([tenantId, userId])
+  @@index([userId])
   @@map("tenant_membership")
+}
+
+model User {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email         String    @unique
+  displayName   String
+  isActive      Boolean   @default(true)
+  deactivatedAt DateTime?
+
+  // Multi-tenancy: a User can belong to N Tenants via TenantMembership.
+  // User itself is global (no tenantId) — login lookup is global by email.
+  tenantMemberships TenantMembership[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("app_user")
+}
+
+model LegalEntity {
+  id             String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId       String        @db.Uuid
+  tenant         Tenant        @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  // Phase 4b: code is unique PER tenant. Two tenants can both own
+  // an entity coded "ACME" — collisions are isolated by tenantId.
+  code           String
+  name           String
+  parentEntityId String?       @db.Uuid
+  parent         LegalEntity?  @relation("EntityHierarchy", fields: [parentEntityId], references: [id])
+  children       LegalEntity[] @relation("EntityHierarchy")
+
+  // The currency this entity reports in. Each book may override for reporting.
+  functionalCurrencyId String
+  functionalCurrency   Currency @relation("EntityFunctionalCcy", fields: [functionalCurrencyId], references: [code])
+
+  // NetSuite OneWorld: one subsidiary per group is the "elimination
+  // subsidiary" — its only postings are the intercompany eliminations
+  // the consolidation engine generates.
+  isEliminationEntity Boolean @default(false)
+
+  // Lineage — null for natively-created entities; populated on ERP import.
+  sourceSystem     String?
+  sourceRecordType String?
+  sourceRecordId   String?
+  sourcePayload    Json?
+  mappingVersion   String?
+  extensions       Json?
+
+  fiscalCalendars FiscalCalendar[]
+  accounts        Account[]
+  journalEntries  JournalEntry[]
+  parties         Party[]
+  fixedAssets     FixedAsset[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@map("legal_entity")
+}
+
+model Book {
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code                String    @unique // e.g. "US_GAAP", "US_TAX", "IFRS", "MGMT"
+  name                String
+  // The accounting basis. Drives default behavior in posting rules + reports.
+  basis               BookBasis
+  // Reporting currency for THIS book. Functional currency lives on LegalEntity.
+  reportingCurrencyId String
+  reportingCurrency   Currency  @relation("BookReportingCcy", fields: [reportingCurrencyId], references: [code])
+
+  isActive   Boolean @default(true)
+  extensions Json?
+
+  journalEntries           JournalEntry[]
+  fixedAssetBookAttributes FixedAssetBookAttributes[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("book")
+}
+
+model FiscalCalendar {
+  id              String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId        String          @db.Uuid
+  tenant          Tenant          @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  entityId        String          @db.Uuid
+  entity          LegalEntity     @relation(fields: [entityId], references: [id])
+  code            String // e.g. "STANDARD_2026"
+  name            String
+  periodFrequency PeriodFrequency @default(MONTHLY)
+
+  periods Period[]
+
+  createdAt DateTime @default(now())
+
+  @@unique([entityId, code])
+  @@index([tenantId])
+  @@map("fiscal_calendar")
+}
+
+model Period {
+  id         String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId   String         @db.Uuid
+  tenant     Tenant         @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  calendarId String         @db.Uuid
+  calendar   FiscalCalendar @relation(fields: [calendarId], references: [id])
+  code       String // e.g. "2026-01", "2026-Q1"
+  ordinal    Int // 1..12 for monthly, 1..52 for weekly
+  startsOn   DateTime       @db.Date
+  endsOn     DateTime       @db.Date
+
+  journalEntries JournalEntry[]
+
+  @@unique([calendarId, code])
+  @@unique([calendarId, ordinal])
+  @@index([startsOn, endsOn])
+  @@index([tenantId])
+  @@map("period")
+}
+
+model Currency {
+  // ISO 4217 code is the primary key — these are stable.
+  code     String  @id // "USD", "EUR", "JPY"
+  name     String
+  decimals Int     @default(2) // 2 for USD, 0 for JPY, etc.
+  symbol   String?
+
+  entitiesFunctional LegalEntity[]  @relation("EntityFunctionalCcy")
+  booksReporting     Book[]         @relation("BookReportingCcy")
+  journalEntries     JournalEntry[] @relation("JeCurrency")
+  fixedAssets        FixedAsset[]   @relation("FixedAssetAcqCcy")
+
+  @@map("currency")
+}
+
+model Party {
+  id          String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String       @db.Uuid
+  tenant      Tenant       @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  entityId    String?      @db.Uuid // null = shared across entities
+  entity      LegalEntity? @relation(fields: [entityId], references: [id])
+  code        String // human-readable, often source-system code
+  displayName String
+
+  // Customer:Job / Project / WBS / Sage Job all collapse to one Party with parent.
+  parentPartyId String? @db.Uuid
+  parent        Party?  @relation("PartyHierarchy", fields: [parentPartyId], references: [id])
+  children      Party[] @relation("PartyHierarchy")
+
+  vendorFixedAssets FixedAsset[] @relation("FixedAssetVendor")
+
+  sourceSystem     String?
+  sourceRecordType String?
+  sourceRecordId   String?
+  sourcePayload    Json?
+  mappingVersion   String?
+  extensions       Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([entityId, code])
+  @@index([tenantId])
+  // Created by ledger-core's raw SQL (prisma/migrations/0001_constraints);
+  // declared here so db:diff stays clean (zero ledger-core statements).
+  @@index([extensions(ops: JsonbOps)], map: "party_extensions_gin", type: Gin)
+  @@map("party")
+}
+
+model Account {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  tenantId String @db.Uuid
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+
+  // entityId null = shared across all entities (consolidated chart).
+  entityId String?      @db.Uuid
+  entity   LegalEntity? @relation(fields: [entityId], references: [id])
+
+  // Human-readable code (e.g. "1000" for Cash). NOT a source-system primary key.
+  code             String
+  name             String
+  type             AccountType
+  normalBalance    NormalBalance
+  subtype          String? // e.g. "CASH", "AR_TRADE", "INVENTORY_RAW"
+  isContra         Boolean       @default(false)
+  isControlAccount Boolean       @default(false) // true for AR/AP control accounts
+  isBank           Boolean       @default(false)
+
+  // ASC 830 / IAS 21: monetary accounts are re-measured at period-end CLOSE
+  // rate; non-monetary accounts stay at historical rate.
+  isMonetary Boolean @default(false)
+
+  // FX Phase 4 — ASC 830 translation method for CONSOLIDATION. Nullable so
+  // existing single-currency installations don't need a backfill.
+  translationCategory TranslationCategory?
+
+  parentAccountId String?   @db.Uuid
+  parent          Account?  @relation("AccountHierarchy", fields: [parentAccountId], references: [id])
+  children        Account[] @relation("AccountHierarchy")
+
+  // Books this account applies to. Empty = applies to all books.
+  bookScope String[] @default([])
+
+  active Boolean @default(true)
+
+  // BlackLine arc Phase 1: per-account override of the tenant default.
+  requiresReconReview Boolean?
+  reconTolerance      Decimal? @db.Decimal(20, 4)
+
+  sourceSystem     String?
+  sourceRecordType String?
+  sourceRecordId   String?
+  sourcePayload    Json?
+  mappingVersion   String?
+  extensions       Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([entityId, code])
+  @@index([type])
+  @@index([tenantId])
+  // Created by ledger-core's raw SQL (prisma/migrations/0001_constraints);
+  // declared here so db:diff stays clean (zero ledger-core statements).
+  @@index([extensions(ops: JsonbOps)], map: "account_extensions_gin", type: Gin)
+  @@map("account")
+}
+
+model JournalEntry {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  tenantId String @db.Uuid
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+
+  // entryNumber is a human-readable sequential ID.
+  // Phase 4b: unique per [tenantId, entryNumber].
+  entryNumber String
+
+  entityId String      @db.Uuid
+  entity   LegalEntity @relation(fields: [entityId], references: [id])
+  bookId   String      @db.Uuid
+  book     Book        @relation(fields: [bookId], references: [id])
+
+  // periodId is resolved at posting time from the document/posting date and
+  // the entity's fiscal calendar.
+  periodId String? @db.Uuid
+  period   Period? @relation(fields: [periodId], references: [id])
+
+  documentDate DateTime @db.Date
+  postingDate  DateTime @db.Date
+
+  memo String
+
+  currencyId String
+  currency   Currency @relation("JeCurrency", fields: [currencyId], references: [code])
+  fxRate     Decimal  @default(1) @db.Decimal(20, 10)
+
+  source JournalSource @default(MANUAL)
+  status EntryStatus   @default(POSTED)
+
+  reversalOfId String?        @db.Uuid
+  reversalOf   JournalEntry?  @relation("Reversal", fields: [reversalOfId], references: [id])
+  reversedBy   JournalEntry[] @relation("Reversal")
+
+  // Lineage — non-negotiable per spec. Populated on every ERP import.
+  // fa-amort's depreciation runs post with sourceSystem="fa-amort",
+  // sourceRecordType="DepreciationRun",
+  // sourceRecordId="<assetId>:<bookCode>:<YYYY-MM-DD>".
+  sourceSystem     String? // "QBO", "NETSUITE", "INTACCT", ...
+  sourceRecordType String? // "Invoice", "Bill", "JournalEntry", ...
+  sourceRecordId   String? // the source system's ID (NEVER reused as our PK)
+  sourcePayload    Json? // frozen raw original
+  mappingVersion   String?
+  extensions       Json?
+
+  // Denormalized line sums. Per the invariant that debits == credits,
+  // these are equal on every well-formed entry (postJournalEntry
+  // enforces this). Populated by ledger-core on every new entry.
+  totalDebit  Decimal @default(0) @db.Decimal(18, 4)
+  totalCredit Decimal @default(0) @db.Decimal(18, 4)
+
+  // Ownership + audit. ownerId is the default-responsible-party (see
+  // ledger-core docs/ownership-and-rules.md). Polymorphic (User OR Queue,
+  // discriminated by ownerType) — no FK relation by design.
+  ownerId              String?   @db.Uuid
+  ownerType            OwnerType @default(USER)
+  updatedBy            String?
+  updatedAt            DateTime  @default(now()) @updatedAt
+  // When set, the reassignment-rules engine SKIPS this record.
+  reassignmentLockedAt DateTime?
+
+  createdAt DateTime @default(now())
+  createdBy String?
+
+  @@unique([tenantId, entryNumber])
+  @@index([ownerId])
+  @@index([entityId, bookId, documentDate])
+  @@index([entityId, bookId, periodId])
+  @@index([sourceSystem, sourceRecordType, sourceRecordId])
+  @@index([tenantId, postingDate])
+  // Created by ledger-core's raw SQL (migrations 0001_constraints + 0019);
+  // declared here so db:diff stays clean (zero ledger-core statements).
+  @@index([extensions(ops: JsonbOps)], map: "gl_entry_header_extensions_gin", type: Gin)
+  @@index([tenantId, totalDebit], map: "gl_entry_header_total_debit_idx")
+  @@map("gl_entry_header")
+}
+
+// =========================================================================
+// Fixed assets (the substrate models fa-amort reads + drives).
+// ledger-core owns these tables; see the header EXCEPTION note for the
+// four fa-amort-added audit columns.
+// =========================================================================
+
+model FixedAsset {
+  id       String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId String      @db.Uuid
+  tenant   Tenant      @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  entityId String      @db.Uuid
+  entity   LegalEntity @relation(fields: [entityId], references: [id])
+
+  code                  String // asset tag, e.g. "LAPTOP-001"
+  description           String
+  category              String? // e.g. "COMPUTER_EQUIPMENT"
+  vendorPartyId         String?          @db.Uuid
+  vendor                Party?           @relation("FixedAssetVendor", fields: [vendorPartyId], references: [id])
+  acquisitionDate       DateTime         @db.Date
+  acquisitionCost       Decimal          @db.Decimal(18, 4)
+  acquisitionCurrencyId String
+  acquisitionCurrency   Currency         @relation("FixedAssetAcqCcy", fields: [acquisitionCurrencyId], references: [code])
+  status                FixedAssetStatus @default(IN_SERVICE)
+  disposalDate          DateTime?        @db.Date
+  disposalProceeds      Decimal?         @db.Decimal(18, 4)
+
+  // Which gross-cost asset account on the GL holds the original cost.
+  assetAccountCode String // e.g. "1500" Computer Equipment
+
+  bookAttributes FixedAssetBookAttributes[]
+
+  // Backref to fa-amort's own tables.
+  aiSuggestions AiAssetSuggestion[]
+
+  // fa-amort-added audit columns (NOT in ledger-core's schema — applied via
+  // prisma/sql/2026-06-05-attribution-schema.sql to close v2.1 deficiency
+  // #25; pending upstreaming). `createdBy` is set by the Server Action that
+  // creates the FixedAsset row (manual UI flow); NetSuite imports leave it
+  // null (no human actor). `disposedBy` flips on disposal. DSR attribution
+  // (fa-attribution.ts) reads these columns.
+  createdBy  String? @db.Uuid
+  disposedBy String? @db.Uuid
+
+  sourceSystem     String?
+  sourceRecordType String?
+  sourceRecordId   String?
+  sourcePayload    Json?
+  mappingVersion   String?
+  extensions       Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([entityId, code])
+  @@index([entityId, status])
+  @@index([tenantId])
+  // fa-amort-added (2026-06-05 attribution raw SQL). The raw SQL created
+  // the index names UNQUOTED, so Postgres folded them to lowercase — the
+  // maps pin the actual physical names to keep db:diff at zero statements.
+  @@index([createdBy], map: "fixed_asset_createdby_idx")
+  @@index([disposedBy], map: "fixed_asset_disposedby_idx")
+  @@map("fixed_asset")
+}
+
+model FixedAssetBookAttributes {
+  assetId                 String             @db.Uuid
+  asset                   FixedAsset         @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  bookId                  String             @db.Uuid
+  book                    Book               @relation(fields: [bookId], references: [id])
+  usefulLifeMonths        Int
+  depreciationMethod      DepreciationMethod
+  inServiceDate           DateTime           @db.Date
+  salvageValue            Decimal            @default(0) @db.Decimal(18, 4)
+  accumulatedDepreciation Decimal            @default(0) @db.Decimal(18, 4)
+  lastDepreciatedThrough  DateTime?          @db.Date
+
+  // GL accounts used when the depreciation runner posts journal entries
+  // for this book.
+  depreciationExpenseAccountCode String // e.g. "8000" Depreciation Expense
+  accumDepreciationAccountCode   String // e.g. "1510" Accum Dep contra-asset
+
+  // fa-amort-added audit columns (NOT in ledger-core's schema — applied via
+  // prisma/sql/2026-06-05-attribution-schema.sql; pending upstreaming).
+  // Set by the Server Action that runs depreciation through a given
+  // throughDate. NetSuite-imported book-attrs rows leave both null.
+  lastRunBy String?   @db.Uuid
+  lastRunAt DateTime?
+
+  @@id([assetId, bookId])
+  @@index([bookId, lastDepreciatedThrough])
+  // fa-amort-added (2026-06-05 attribution raw SQL — short physical name,
+  // lowercase-folded because the raw SQL left it unquoted; the map keeps
+  // db:diff at zero statements).
+  @@index([lastRunBy], map: "fab_lastrunby_idx")
+  @@map("fixed_asset_book_attributes")
+}
+
+// =========================================================================
+// fa-amort-OWNED models — managed by THIS repo (reviewed-diff protocol)
+// =========================================================================
+
+// Audit trail for AI-assisted asset workflows (v0.2). Every Claude call
+// is logged here whether the human accepts or rejects the suggestion —
+// same discipline as recon's AiSuggestion and revenue-rec's
+// AiExtractionSuggestion.
+//
+// kind discriminates between the suggestion types: CAPEX_CLASSIFICATION
+// (is this purchase capitalizable?), USEFUL_LIFE (how many months?),
+// IMPAIRMENT_INDICATOR (does this text suggest impairment?).
+model AiAssetSuggestion {
+  id      String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  /// Nullable because CAPEX_CLASSIFICATION runs BEFORE the asset exists.
+  assetId String?     @db.Uuid
+  asset   FixedAsset? @relation(fields: [assetId], references: [id], onDelete: Cascade)
+
+  kind       AiAssetSuggestionKind
+  /// Free-form input the model evaluated: a purchase description, invoice
+  /// text, news article excerpt, etc.
+  inputText  String
+  /// The model's structured response. Shape depends on kind.
+  outputJson Json
+
+  modelName        String
+  promptHash       String?
+  promptTokens     Int?
+  completionTokens Int?
+  latencyMs        Int?
+
+  // Human-decision audit trail (added 2026-06-05 to close v2.1
+  // deficiency #25). When a Server Action accepts or rejects an AI
+  // suggestion, it populates the matching pair atomically with the
+  // downstream effect. Both null on the initial model-output row.
+  acceptedBy String?   @db.Uuid
+  acceptedAt DateTime?
+  rejectedBy String?   @db.Uuid
+  rejectedAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([assetId])
+  @@index([kind, createdAt])
+  // Physical names come from the 2026-06-05 attribution raw SQL (lowercase-
+  // folded because the raw SQL left them unquoted); the maps keep db:diff
+  // at zero statements against this owned table.
+  @@index([acceptedBy], map: "aas_acceptedby_idx")
+  @@index([rejectedBy], map: "aas_rejectedby_idx")
+  @@map("ai_asset_suggestion")
+}
+
+enum AiAssetSuggestionKind {
+  CAPEX_CLASSIFICATION
+  USEFUL_LIFE
+  IMPAIRMENT_INDICATOR
 }

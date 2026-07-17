@@ -44,7 +44,10 @@ Example:
 - **Outcome**: one-line result
 -->
 
-_No recent completions yet._
+### Session mirror-resync · 2026-07-16 (commit `8ad0dc1`)
+- **Scope**: re-synced the ledger-core schema mirror to main@9442667, FK-closed it, banned `db push` (reviewed-diff protocol); docs updated (CLAUDE.md rule 8, ARCHITECTURE.md schema-safety protocol, README quick start)
+- **Branch**: claude/mirror-resync (pushed; PR #30 open against main)
+- **Outcome**: db:diff now emits ZERO statements against mirrored/owned tables; tsc clean; 170/170 tests green. No DDL was executed.
 
 ---
 
