@@ -17,14 +17,16 @@
 //      statement against one of them, the mirror has drifted — re-generate it
 //      from ledger-core before doing anything else.
 //
-//      EXCEPTION, documented: fa-amort added four audit columns to two
-//      ledger-core-owned tables via reviewed raw SQL
+//      HISTORY (no longer an exception): fa-amort once added four audit
+//      columns to two ledger-core-owned tables via reviewed raw SQL
 //      (prisma/sql/2026-06-05-attribution-schema.sql): FixedAsset.createdBy
 //      / .disposedBy and FixedAssetBookAttributes.lastRunBy / .lastRunAt,
-//      plus their indexes. They are declared here (so the diff stays at
-//      zero) but do NOT exist in ledger-core's schema yet — they are
-//      pending upstreaming. Do not add more columns to ledger-core tables
-//      from this repo; upstream them instead.
+//      plus their indexes. They sat undeclared in ledger-core's schema for
+//      six weeks. They were upstreamed in ledger-nexus/ledger-core#263
+//      (2026-07-16), so ledger-core's schema is canon for them again and
+//      they are now ordinary mirrored columns — nothing here is a
+//      deviation. Never add columns to ledger-core tables from this repo;
+//      upstream them to ledger-core first, then re-generate this mirror.
 //
 //   2. fa-amort models fa-amort OWNS (AiAssetSuggestion). Schema changes to
 //      the shared DB are applied via a REVIEWED `prisma migrate diff`
@@ -492,8 +494,8 @@ model JournalEntry {
 
 // =========================================================================
 // Fixed assets (the substrate models fa-amort reads + drives).
-// ledger-core owns these tables; see the header EXCEPTION note for the
-// four fa-amort-added audit columns.
+// ledger-core owns these tables. The four audit columns fa-amort once
+// added by raw SQL are upstreamed (ledger-core#263) — see the header.
 // =========================================================================
 
 model FixedAsset {
@@ -524,9 +526,9 @@ model FixedAsset {
   // Backref to fa-amort's own tables.
   aiSuggestions AiAssetSuggestion[]
 
-  // fa-amort-added audit columns (NOT in ledger-core's schema — applied via
-  // prisma/sql/2026-06-05-attribution-schema.sql to close v2.1 deficiency
-  // #25; pending upstreaming). `createdBy` is set by the Server Action that
+  // Audit columns, originally added by fa-amort via raw SQL to close v2.1
+  // deficiency #25 and upstreamed into ledger-core's schema in
+  // ledger-core#263. `createdBy` is set by the Server Action that
   // creates the FixedAsset row (manual UI flow); NetSuite imports leave it
   // null (no human actor). `disposedBy` flips on disposal. DSR attribution
   // (fa-attribution.ts) reads these columns.
@@ -571,8 +573,8 @@ model FixedAssetBookAttributes {
   depreciationExpenseAccountCode String // e.g. "8000" Depreciation Expense
   accumDepreciationAccountCode   String // e.g. "1510" Accum Dep contra-asset
 
-  // fa-amort-added audit columns (NOT in ledger-core's schema — applied via
-  // prisma/sql/2026-06-05-attribution-schema.sql; pending upstreaming).
+  // Audit columns, originally added by fa-amort via raw SQL and upstreamed
+  // into ledger-core's schema in ledger-core#263.
   // Set by the Server Action that runs depreciation through a given
   // throughDate. NetSuite-imported book-attrs rows leave both null.
   lastRunBy String?   @db.Uuid
