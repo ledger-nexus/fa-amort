@@ -26,11 +26,7 @@ Update your own heartbeat every ~20 turns. If your heartbeat is older
 than 60 minutes, other sessions may consider your claim stale.
 -->
 
-### Session mirror-resync · started 2026-07-16 19:20 · heartbeat 19:20
-- **Scope**: re-sync ledger-core schema mirror to main@9442667, FK-close it, ban `db push` (reviewed-diff protocol)
-- **Files / globs**: `prisma/schema.prisma`, `package.json`, `CLAUDE.md`, `docs/ARCHITECTURE.md`, `README.md`, `src/lib/mappers/netsuite/import.ts` (minimal type fixes only)
-- **Branch**: claude/mirror-resync
-- **Working dir**: /Users/hosungson/Code/fa-amort/.claude/worktrees/mirror-resync-fa
+_No active claims._
 
 ---
 
@@ -48,7 +44,10 @@ Example:
 - **Outcome**: one-line result
 -->
 
-_No recent completions yet._
+### Session mirror-resync · 2026-07-16 (commit `8ad0dc1`)
+- **Scope**: re-synced the ledger-core schema mirror to main@9442667, FK-closed it, banned `db push` (reviewed-diff protocol); docs updated (CLAUDE.md rule 8, ARCHITECTURE.md schema-safety protocol, README quick start)
+- **Branch**: claude/mirror-resync (pushed; PR #30 open against main)
+- **Outcome**: db:diff now emits ZERO statements against mirrored/owned tables; tsc clean; 170/170 tests green. No DDL was executed.
 
 ---
 
